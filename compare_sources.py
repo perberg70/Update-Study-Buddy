@@ -239,7 +239,7 @@ def apply_review():
     print(f"  Pairs:        {replace_n} REPLACE, {delete_pair} DELETE, {keep_pair} KEEP")
     print(f"  Current-only: {delete_only} DELETE, {keep_only} KEEP")
     print(f"  New-only:     {add_n} ADD, {skip_n} SKIP")
-    print(f"  → {total_delete} source(s) to delete, {total_upload} file(s) to upload")
+    print(f"  -> {total_delete} source(s) to delete, {total_upload} file(s) to upload")
     print()
 
     if total_delete > 0:
