@@ -6,6 +6,8 @@ import json
 import os
 import re
 import sys
+from config import CDP_URL, PROJECT_URL, REVIEW_PATH
+import config as app_config
 from config import CDP_URL, PROJECT_URL, REVIEW_PATH, normalize_action
 
 def _get_name(item: dict) -> str:
@@ -32,6 +34,8 @@ def get_sources_to_remove():
     seen = set()
 
     for pair in review.get("pairs", []):
+        action = app_config.normalize_action(pair.get("action", ""))
+        old = _get_name(pair)
         action = normalize_action(pair.get("action", ""))
         old = _get_name(pair)
         old = pair.get("old_name")
@@ -43,6 +47,8 @@ def get_sources_to_remove():
     delete_current_only = 0
 
     for item in review.get("current_only", []):
+        action = app_config.normalize_action(item.get("action", ""))
+        name = _get_name(item)
         action = normalize_action(item.get("action", ""))
         name = _get_name(item)
         name = item.get("name")
@@ -52,6 +58,7 @@ def get_sources_to_remove():
             delete_current_only += 1
 
     for pair in review.get("pairs", []):
+        action = app_config.normalize_action(pair.get("action", ""))
         action = normalize_action(pair.get("action", ""))
         if action in ("REPLACE", "DELETE"):
             delete_pairs += 1
