@@ -47,6 +47,12 @@ def normalize_action(value: str) -> str:
         return ""
 
     raw = str(value).strip().upper()
+    Supports whitespace, punctuation and common aliases so manual edits are
+    interpreted reliably across scripts.
+    """
+    if value is None:
+        return ""
+    cleaned = "".join(ch for ch in str(value).strip().upper() if ch.isalpha() or ch == "_")
     aliases = {
         "REPLACE": "REPLACE",
         "REPLACED": "REPLACE",

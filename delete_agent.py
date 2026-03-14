@@ -17,6 +17,7 @@ def _get_name(item: dict) -> str:
         or item.get("title")
         or ""
     )
+from config import CDP_URL, PROJECT_URL, REVIEW_PATH, normalize_action
 
 
 def get_sources_to_remove():
@@ -33,6 +34,7 @@ def get_sources_to_remove():
     for pair in review.get("pairs", []):
         action = normalize_action(pair.get("action", ""))
         old = _get_name(pair)
+        old = pair.get("old_name")
         if old and action in ("REPLACE", "DELETE") and old not in seen:
             seen.add(old)
             names.append(old)
@@ -43,6 +45,7 @@ def get_sources_to_remove():
     for item in review.get("current_only", []):
         action = normalize_action(item.get("action", ""))
         name = _get_name(item)
+        name = item.get("name")
         if name and action == "DELETE" and name not in seen:
             seen.add(name)
             names.append(name)
