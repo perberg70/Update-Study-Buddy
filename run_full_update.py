@@ -14,10 +14,10 @@ def run_script(name, args=None):
 
 def main():
     print("=" * 60)
-    print("  Study Buddy — Full Course Update")
+    print("  Study Buddy - Full Course Update")
     print("=" * 60)
 
-    # ── Phase 1: Extract & Compare ──────────────────────────────
+    # Phase 1: Extract and compare
     if not run_script("export_current_sources.py"):
         return
     if not run_script("extract_edx.py"):
@@ -27,7 +27,7 @@ def main():
     if not run_script("compare_sources.py"):
         return
 
-    # ── Review pause ────────────────────────────────────────────
+    # Review pause
     print()
     print("=" * 60)
     print("  REVIEW PHASE")
@@ -36,9 +36,9 @@ def main():
     print("  comparison_review.json has been generated.")
     print("  Open it in your editor and review / adjust the actions:")
     print()
-    print("    PAIRS        → REPLACE | DELETE | KEEP")
-    print("    CURRENT_ONLY → DELETE  | KEEP")
-    print("    NEW_ONLY     → ADD     | SKIP")
+    print("    PAIRS        -> REPLACE | DELETE | KEEP")
+    print("    CURRENT_ONLY -> DELETE  | KEEP")
+    print("    NEW_ONLY     -> ADD     | SKIP")
     print()
     print("  Save the file when done, then press Enter here.")
     print("=" * 60)
@@ -49,7 +49,7 @@ def main():
         print("\nAborted.")
         return
 
-    # ── Phase 2: Apply (delete old + upload new) ────────────────
+    # Phase 2: Apply (delete old + upload new)
     if not run_script("compare_sources.py", ["--apply"]):
         return
 

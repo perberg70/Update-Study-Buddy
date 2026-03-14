@@ -9,8 +9,7 @@ import re
 import sys
 from playwright.sync_api import sync_playwright
 
-CURRENT_SOURCES_FILE = "current_sources.json"
-PROJECT_URL = "https://notebooklm.google.com/notebook/82c34a38-cbc5-47fe-8001-36696f67d7fb"
+from config import CDP_URL, CURRENT_SOURCES_FILE, PROJECT_URL
 
 
 def run_export():
@@ -18,7 +17,7 @@ def run_export():
 
     with sync_playwright() as p:
         try:
-            browser = p.chromium.connect_over_cdp("http://localhost:9222")
+            browser = p.chromium.connect_over_cdp(CDP_URL)
             context = browser.contexts[0]
             page = context.pages[0]
             print("[OK] Connected via CDP.")
@@ -30,31 +29,31 @@ def run_export():
         page.goto(PROJECT_URL, wait_until="domcontentloaded")
         page.wait_for_load_state("load")
 
-        page.get_by_role("button", name=re.compile(r"(\+\s*)?Add\s+source|Lägg\s+till\s+källa", re.I)).first.wait_for(
+        page.get_by_role("button", name=re.compile(r"(\+\s*)?Add\s+source|L\u00e4gg\s+till\s+k\u00e4lla", re.I)).first.wait_for(
             state="visible", timeout=30_000
         )
         page.wait_for_timeout(2000)
 
         # Scroll the Sources panel so all items are in DOM (virtual list)
         try:
-            panel = page.locator('section, [role="region"], [class*="sidebar"], [class*="source"]').filter(has=page.get_by_text(re.compile(r"Add\s+source|Sources|Källor", re.I))).first
+            panel = page.locator('section, [role="region"], [class*="sidebar"], [class*="source"]').filter(has=page.get_by_text(re.compile(r"Add\s+source|Sources|K\u00e4llor", re.I))).first
             for _ in range(8):
                 panel.evaluate("el => el.scrollBy(0, 350)")
                 page.wait_for_timeout(250)
         except Exception:
             pass
 
-        # Icon/UI labels to exclude (Material icons, controls) – not real source names
+        # Icon/UI labels to exclude (Material icons, controls) - not real source names
         IGNORE_TOKENS = {
             "description", "more_vert", "drive_pdf", "video_audio_call", "video_youtube",
-            "more", "mer", "add", "lägg", "sources", "källor", "insert_drive_file",
+            "more", "mer", "add", "l\u00e4gg", "sources", "k\u00e4llor", "insert_drive_file",
             "link", "content_copy", "upload", "folder", "image", "article",
             "keyboard_arrow_down", "expand_more", "expand_less", "arrow_drop_down",
         }
         # Full phrases / UI labels that must not appear as source names (exact or contained)
         UI_PHRASES_EXCLUDE = {
             "select all sources", "keyboard arrow down", "keyboard_arrow_down",
-            "välj alla källor", "video_audio_call", "video_youtube", "drive_pdf",
+            "v\u00e4lj alla k\u00e4llor", "video_audio_call", "video_youtube", "drive_pdf",
         }
 
         # Scrape only from the Sources panel: find list items and get the actual source title (aria-labelledby or main text minus icons)
@@ -62,7 +61,7 @@ def run_export():
             const ignore = new Set((ignoreTokens || []).map(s => s.toLowerCase()));
             const out = [];
             // Find the Sources section: region that contains "Add source" / "Sources" and has the source list
-            const addBtn = Array.from(document.querySelectorAll('button, [role="button"]')).find(b => /add\\s+source|sources|källor|lägg\\s+till/i.test(b.textContent || b.getAttribute('aria-label') || ''));
+            const addBtn = Array.from(document.querySelectorAll('button, [role="button"]')).find(b => /add\\s+source|sources|k\u00e4llor|l\u00e4gg\\s+till/i.test(b.textContent || b.getAttribute('aria-label') || ''));
             const sourcesPanel = addBtn ? addBtn.closest('section, [role="region"], aside, nav, [class*="sidebar"], [class*="panel"], [class*="source"]') || document : document;
 
             const listItems = sourcesPanel.querySelectorAll('[role="listitem"]');
@@ -83,7 +82,7 @@ def run_export():
 
             if (out.length) return [...new Set(out)];
 
-            // Fallback 1: rows that contain a More/menu button – the row text is the source name
+            // Fallback 1: rows that contain a More/menu button \u2013 the row text is the source name
             const withMenu = sourcesPanel.querySelectorAll('[aria-label*="More"], [aria-label*="Mer"], button[aria-label], [class*="more"]');
             const seen = new Set();
             withMenu.forEach(btn => {
@@ -149,13 +148,13 @@ def run_export():
         if not sources or all(len(s) < 5 for s in sources):
             try:
                 full_text = page.evaluate("""() => {
-                    const btn = Array.from(document.querySelectorAll('button, [role="button"]')).find(b => /add\\s+source|sources|källor|lägg/i.test(b.textContent || b.getAttribute('aria-label') || ''));
+                    const btn = Array.from(document.querySelectorAll('button, [role="button"]')).find(b => /add\\s+source|sources|k\u00e4llor|l\u00e4gg/i.test(b.textContent || b.getAttribute('aria-label') || ''));
                     if (!btn) return '';
                     const panel = btn.closest('section') || btn.closest('aside') || btn.closest('[class*="sidebar"]') || btn.closest('[class*="panel"]') || btn.closest('nav') || btn.parentElement?.parentElement?.parentElement;
                     return panel ? panel.innerText : '';
                 }""")
                 if full_text and isinstance(full_text, str):
-                    ui_phrases = {"add source", "add sources", "sources", "källor", "lägg till källa", "upload files", "websites", "drive", "copied text", "ladda upp", "webbplatser", "more", "mer", "select all sources", "keyboard arrow down", "välj alla källor"}
+                    ui_phrases = {"add source", "add sources", "sources", "k\u00e4llor", "l\u00e4gg till k\u00e4lla", "upload files", "websites", "drive", "copied text", "ladda upp", "webbplatser", "more", "mer", "select all sources", "keyboard arrow down", "v\u00e4lj alla k\u00e4llor"}
                     for line in full_text.splitlines():
                         line = line.strip()
                         if not line or len(line) < 3:
@@ -175,10 +174,10 @@ def run_export():
         # Python fallback 3: same but with Playwright locator for panel
         if not sources or all(len(s) < 5 for s in sources):
             try:
-                add_btn = page.get_by_role("button", name=re.compile(r"(\+\s*)?Add\s+source|Lägg\s+till\s+källa", re.I)).first
+                add_btn = page.get_by_role("button", name=re.compile(r"(\+\s*)?Add\s+source|L\u00e4gg\s+till\s+k\u00e4lla", re.I)).first
                 panel = page.locator("section, [role='region'], aside, nav").filter(has=add_btn).first
                 full_text = panel.inner_text(timeout=5000)
-                ui_phrases = {"add source", "add sources", "sources", "källor", "lägg till källa", "upload files", "websites", "drive", "copied text", "ladda upp", "webbplatser", "more", "mer", "select all sources", "keyboard arrow down", "välj alla källor"}
+                ui_phrases = {"add source", "add sources", "sources", "k\u00e4llor", "l\u00e4gg till k\u00e4lla", "upload files", "websites", "drive", "copied text", "ladda upp", "webbplatser", "more", "mer", "select all sources", "keyboard arrow down", "v\u00e4lj alla k\u00e4llor"}
                 for line in full_text.splitlines():
                     line = line.strip()
                     if not line or len(line) < 3 or line.lower() in ui_phrases:
@@ -197,14 +196,14 @@ def run_export():
 
         if not sources:
             debug_text = page.evaluate("""() => {
-                const btn = Array.from(document.querySelectorAll('button, [role="button"]')).find(b => /add\\s+source|sources|källor|lägg/i.test(b.textContent || b.getAttribute('aria-label') || ''));
+                const btn = Array.from(document.querySelectorAll('button, [role="button"]')).find(b => /add\\s+source|sources|k\u00e4llor|l\u00e4gg/i.test(b.textContent || b.getAttribute('aria-label') || ''));
                 const panel = btn ? (btn.closest('section') || btn.closest('aside') || btn.closest('[class*="sidebar"]') || btn.parentElement?.parentElement) : null;
                 return panel ? panel.innerText : (document.body?.innerText || '').slice(0, 8000);
             }""")
             debug_path = "export_sources_debug.txt"
             with open(debug_path, "w", encoding="utf-8") as f:
                 f.write(debug_text if isinstance(debug_text, str) else str(debug_text))
-            print(f"[DEBUG] 0 sources found. Wrote panel text to {debug_path} – check it to adjust selectors.")
+            print(f"[DEBUG] 0 sources found. Wrote panel text to {debug_path} \u2013 check it to adjust selectors.")
 
         with open(CURRENT_SOURCES_FILE, "w", encoding="utf-8") as f:
             json.dump(sources, f, indent=2, ensure_ascii=False)
