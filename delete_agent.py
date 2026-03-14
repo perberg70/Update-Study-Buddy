@@ -8,7 +8,7 @@ import re
 import sys
 from playwright.sync_api import sync_playwright
 
-from config import CDP_URL, PROJECT_URL, REVIEW_PATH
+from config import CDP_URL, PROJECT_URL, REVIEW_PATH, normalize_action
 
 
 def get_sources_to_remove():
@@ -23,14 +23,14 @@ def get_sources_to_remove():
     seen = set()
 
     for pair in review.get("pairs", []):
-        action = pair.get("action", "").upper()
+        action = normalize_action(pair.get("action", ""))
         old = pair.get("old_name")
         if old and action in ("REPLACE", "DELETE") and old not in seen:
             seen.add(old)
             names.append(old)
 
     for item in review.get("current_only", []):
-        action = item.get("action", "").upper()
+        action = normalize_action(item.get("action", ""))
         name = item.get("name")
         if name and action == "DELETE" and name not in seen:
             seen.add(name)

@@ -24,7 +24,36 @@ EXTRACT_DIR = os.getenv("EDX_EXTRACT_DIR", "edx_export")
 ORGANIZED_CONTENT_DIR = os.getenv("ORGANIZED_CONTENT_DIR", "Organized_Course_Content")
 COURSE_STRUCTURE_PATH = os.getenv("COURSE_STRUCTURE_PATH", "course_structure.json")
 
-MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "50"))
+MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "200"))
+ENFORCE_UPLOAD_SIZE_LIMIT = os.getenv("ENFORCE_UPLOAD_SIZE_LIMIT", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
+
+def normalize_action(value: str) -> str:
+    """Normalize human-edited action values from review JSON.
+
+    Supports whitespace, punctuation and common aliases so manual edits are
+    interpreted reliably across scripts.
+    """
+    if value is None:
+        return ""
+    cleaned = "".join(ch for ch in str(value).strip().upper() if ch.isalpha() or ch == "_")
+    aliases = {
+        "REPLACE": "REPLACE",
+        "REPLACED": "REPLACE",
+        "DELETE": "DELETE",
+        "REMOVE": "DELETE",
+        "DEL": "DELETE",
+        "KEEP": "KEEP",
+        "ADD": "ADD",
+        "UPLOAD": "ADD",
+        "SKIP": "SKIP",
+    }
+    return aliases.get(cleaned, cleaned)
 
 
 def resolve_tar_path(explicit_path: Optional[str] = None) -> str:

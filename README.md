@@ -133,7 +133,7 @@ Update Study Buddy/
 
 ## Configuration notes
 
-- **File size:** Files larger than 50 MB are skipped during upload (CDP limit). Threshold: `MAX_UPLOAD_SIZE_MB` in `upload_agent.py`.
+- **File size:** Upload size checks are configurable. Default threshold is `MAX_UPLOAD_SIZE_MB=200`; by default oversized files are attempted with a warning. Set `ENFORCE_UPLOAD_SIZE_LIMIT=true` to hard-skip oversized files.
 - **Account:** Use the Chrome window started with `--remote-debugging-port=9222` and log in with the Google account that has editor access to the notebook.
 - **Duplicate cleanup:** `delete_agent.py` loops until all copies of a source name are removed, so accumulated duplicates are cleaned up in one run.
 
@@ -141,9 +141,10 @@ Update Study Buddy/
 
 ## Troubleshooting
 
+- **Merge conflict after pull/rebase** — run `git add --renormalize .` once after pulling this change, then commit. For real conflicts: `git status`, edit conflict blocks, `git add <file>`, then continue with `git rebase --continue` or complete the merge commit.
 - **"CDP connection failed"** — Start Chrome with `--remote-debugging-port=9222` and run the script again.
 - **"current_sources.json not found"** — Run `export_current_sources.py` first (with Chrome on 9222).
-- **"course.*.tar.gz not found"** — Put the edX export in the project folder or change the filename in `extract_edx.py`.
+- **"No edX export found"** — Place `course*.tar.gz` in the project folder, pass `--tar <file>`, or set `EDX_TAR_PATH`.
 - **"course_structure.json not found"** — Run `extract_edx.py` before `organize_content.py`.
 - **Uploads fail or wrong account** — Use Chrome with remote debugging and the correct Google account.
-- **Large files skipped** — Check the 50 MB limit in `upload_agent.py` or upload very large files manually.
+- **Large files skipped** — Check `MAX_UPLOAD_SIZE_MB` / `ENFORCE_UPLOAD_SIZE_LIMIT` in `config.py` (or env vars).
