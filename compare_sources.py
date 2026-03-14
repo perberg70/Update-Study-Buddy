@@ -11,9 +11,7 @@ import subprocess
 import sys
 from difflib import SequenceMatcher
 
-CURRENT_SOURCES_FILE = "current_sources.json"
-MANIFEST_PATH = "processing_manifest.json"
-REVIEW_PATH = "comparison_review.json"
+from config import CURRENT_SOURCES_FILE, MANIFEST_PATH, REVIEW_PATH, normalize_action
 
 STOP_WORDS = {"and", "the", "of", "in", "to", "a", "is", "for", "with", "on", "by", "an", "at", "or", "its"}
 MATCH_THRESHOLD = 0.35
@@ -193,9 +191,9 @@ def generate_review():
             "Review the matches below and set 'action' for each entry, then run:\n"
             "  python compare_sources.py --apply\n"
             "\n"
-            "PAIRS  → REPLACE = delete old + upload new | DELETE = delete old only | KEEP = no change\n"
-            "CURRENT_ONLY → DELETE = remove from notebook | KEEP = leave as-is\n"
-            "NEW_ONLY     → ADD = upload to notebook | SKIP = don't upload"
+            "PAIRS        -> REPLACE = delete old + upload new | DELETE = delete old only | KEEP = no change\n"
+            "CURRENT_ONLY -> DELETE = remove from notebook | KEEP = leave as-is\n"
+            "NEW_ONLY     -> ADD = upload to notebook | SKIP = don't upload"
         ),
         "pairs": pairs,
         "current_only": current_only,
@@ -226,13 +224,13 @@ def apply_review():
     with open(REVIEW_PATH, "r", encoding="utf-8") as f:
         review = json.load(f)
 
-    replace_n = sum(1 for p in review.get("pairs", []) if p.get("action", "").upper() == "REPLACE")
-    delete_pair = sum(1 for p in review.get("pairs", []) if p.get("action", "").upper() == "DELETE")
-    keep_pair = sum(1 for p in review.get("pairs", []) if p.get("action", "").upper() == "KEEP")
-    delete_only = sum(1 for c in review.get("current_only", []) if c.get("action", "").upper() == "DELETE")
-    keep_only = sum(1 for c in review.get("current_only", []) if c.get("action", "").upper() == "KEEP")
-    add_n = sum(1 for n in review.get("new_only", []) if n.get("action", "").upper() == "ADD")
-    skip_n = sum(1 for n in review.get("new_only", []) if n.get("action", "").upper() == "SKIP")
+    replace_n = sum(1 for p in review.get("pairs", []) if normalize_action(p.get("action", "")) == "REPLACE")
+    delete_pair = sum(1 for p in review.get("pairs", []) if normalize_action(p.get("action", "")) == "DELETE")
+    keep_pair = sum(1 for p in review.get("pairs", []) if normalize_action(p.get("action", "")) == "KEEP")
+    delete_only = sum(1 for c in review.get("current_only", []) if normalize_action(c.get("action", "")) == "DELETE")
+    keep_only = sum(1 for c in review.get("current_only", []) if normalize_action(c.get("action", "")) == "KEEP")
+    add_n = sum(1 for n in review.get("new_only", []) if normalize_action(n.get("action", "")) == "ADD")
+    skip_n = sum(1 for n in review.get("new_only", []) if normalize_action(n.get("action", "")) == "SKIP")
 
     total_delete = replace_n + delete_pair + delete_only
     total_upload = replace_n + add_n
@@ -241,7 +239,7 @@ def apply_review():
     print(f"  Pairs:        {replace_n} REPLACE, {delete_pair} DELETE, {keep_pair} KEEP")
     print(f"  Current-only: {delete_only} DELETE, {keep_only} KEEP")
     print(f"  New-only:     {add_n} ADD, {skip_n} SKIP")
-    print(f"  → {total_delete} source(s) to delete, {total_upload} file(s) to upload")
+    print(f"  -> {total_delete} source(s) to delete, {total_upload} file(s) to upload")
     print()
 
     if total_delete > 0:
