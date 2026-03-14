@@ -98,6 +98,7 @@ python run_full_update.py
 - `python compare_sources.py` — generate `comparison_review.json` for review.
 - `python compare_sources.py --apply` — apply the reviewed plan (delete + upload).
 - `python delete_agent.py` — delete sources per `comparison_review.json`.
+- `python delete_agent.py --dry-run` — preview exactly which names are interpreted as delete targets (pairs + current_only) before automation.
 - `python upload_agent.py` — upload sources per `comparison_review.json` (or full manifest).
 
 ---
@@ -148,3 +149,4 @@ Update Study Buddy/
 - **"course_structure.json not found"** — Run `extract_edx.py` before `organize_content.py`.
 - **Uploads fail or wrong account** — Use Chrome with remote debugging and the correct Google account.
 - **Large files skipped** — Check `MAX_UPLOAD_SIZE_MB` / `ENFORCE_UPLOAD_SIZE_LIMIT` in `config.py` (or env vars).
+- **Duplicates remain after delete** — run `python delete_agent.py --dry-run` first and confirm planned names. The delete matcher now uses token/fuzzy matching for truncated UI labels; if names still miss, copy exact source titles from NotebookLM into `comparison_review.json`.

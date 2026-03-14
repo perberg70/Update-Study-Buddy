@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import glob
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -36,6 +37,16 @@ ENFORCE_UPLOAD_SIZE_LIMIT = os.getenv("ENFORCE_UPLOAD_SIZE_LIMIT", "false").lowe
 def normalize_action(value: str) -> str:
     """Normalize human-edited action values from review JSON.
 
+    Accepts loose inputs such as:
+    - "delete", "DELETE ", "DELETE (old)", "remove"
+    - "add", "upload"
+
+    and returns canonical actions used by the pipeline.
+    """
+    if value is None:
+        return ""
+
+    raw = str(value).strip().upper()
     Supports whitespace, punctuation and common aliases so manual edits are
     interpreted reliably across scripts.
     """
@@ -53,6 +64,19 @@ def normalize_action(value: str) -> str:
         "UPLOAD": "ADD",
         "SKIP": "SKIP",
     }
+
+    # Direct match first
+    if raw in aliases:
+        return aliases[raw]
+
+    # Token-based match handles annotations/comments like
+    # "DELETE (old source)" or "add - new".
+    for token in re.findall(r"[A-Z_]+", raw):
+        if token in aliases:
+            return aliases[token]
+
+    # Backward-compatible fallback
+    cleaned = "".join(ch for ch in raw if ch.isalpha() or ch == "_")
     return aliases.get(cleaned, cleaned)
 
 
