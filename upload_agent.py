@@ -6,6 +6,15 @@ from playwright.sync_api import sync_playwright
 
 from config import CDP_URL, MANIFEST_PATH, PROJECT_URL, REVIEW_PATH
 import config as app_config
+from config import (
+    CDP_URL,
+    ENFORCE_UPLOAD_SIZE_LIMIT,
+    MANIFEST_PATH,
+    MAX_UPLOAD_SIZE_MB,
+    PROJECT_URL,
+    REVIEW_PATH,
+    normalize_action,
+)
 
 
 def get_upload_plan():
@@ -21,6 +30,7 @@ def get_upload_plan():
 
     for pair in review.get("pairs", []):
         if app_config.normalize_action(pair.get("action", "")) == "REPLACE":
+        if normalize_action(pair.get("action", "")) == "REPLACE":
             key = (pair["new_name"], pair.get("new_path", ""))
             if key not in seen:
                 seen.add(key)
@@ -33,6 +43,7 @@ def get_upload_plan():
 
     for item in review.get("new_only", []):
         if app_config.normalize_action(item.get("action", "")) == "ADD":
+        if normalize_action(item.get("action", "")) == "ADD":
             key = (item["name"], item.get("path", ""))
             if key not in seen:
                 seen.add(key)
@@ -176,6 +187,11 @@ def run_upload():
                             print(
                                 f"   [SKIP] {file_name} ({size_mb:.1f} MB) exceeds configured limit "
                                 f"{app_config.MAX_UPLOAD_SIZE_MB} MB (ENFORCE_UPLOAD_SIZE_LIMIT=true)."
+                    if size_mb > MAX_UPLOAD_SIZE_MB:
+                        if ENFORCE_UPLOAD_SIZE_LIMIT:
+                            print(
+                                f"   [SKIP] {file_name} ({size_mb:.1f} MB) exceeds configured limit "
+                                f"{MAX_UPLOAD_SIZE_MB} MB (ENFORCE_UPLOAD_SIZE_LIMIT=true)."
                             )
                             page.keyboard.press("Escape")
                             page.wait_for_timeout(300)
@@ -183,6 +199,7 @@ def run_upload():
                             continue
                         print(
                             f"   [WARN] {file_name} ({size_mb:.1f} MB) exceeds {app_config.MAX_UPLOAD_SIZE_MB} MB; "
+                            f"   [WARN] {file_name} ({size_mb:.1f} MB) exceeds {MAX_UPLOAD_SIZE_MB} MB; "
                             "attempting upload anyway."
                         )
                     with page.expect_file_chooser() as fc_info:

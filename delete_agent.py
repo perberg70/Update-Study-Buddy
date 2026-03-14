@@ -8,6 +8,7 @@ import re
 import sys
 from config import CDP_URL, PROJECT_URL, REVIEW_PATH
 import config as app_config
+from config import CDP_URL, PROJECT_URL, REVIEW_PATH, normalize_action
 
 def _get_name(item: dict) -> str:
     """Best-effort source name extraction from review rows."""
@@ -18,6 +19,7 @@ def _get_name(item: dict) -> str:
         or item.get("title")
         or ""
     )
+from config import CDP_URL, PROJECT_URL, REVIEW_PATH, normalize_action
 
 
 def get_sources_to_remove():
@@ -34,6 +36,9 @@ def get_sources_to_remove():
     for pair in review.get("pairs", []):
         action = app_config.normalize_action(pair.get("action", ""))
         old = _get_name(pair)
+        action = normalize_action(pair.get("action", ""))
+        old = _get_name(pair)
+        old = pair.get("old_name")
         if old and action in ("REPLACE", "DELETE") and old not in seen:
             seen.add(old)
             names.append(old)
@@ -44,6 +49,9 @@ def get_sources_to_remove():
     for item in review.get("current_only", []):
         action = app_config.normalize_action(item.get("action", ""))
         name = _get_name(item)
+        action = normalize_action(item.get("action", ""))
+        name = _get_name(item)
+        name = item.get("name")
         if name and action == "DELETE" and name not in seen:
             seen.add(name)
             names.append(name)
@@ -51,6 +59,7 @@ def get_sources_to_remove():
 
     for pair in review.get("pairs", []):
         action = app_config.normalize_action(pair.get("action", ""))
+        action = normalize_action(pair.get("action", ""))
         if action in ("REPLACE", "DELETE"):
             delete_pairs += 1
 
