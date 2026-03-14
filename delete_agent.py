@@ -8,8 +8,7 @@ import re
 import sys
 from playwright.sync_api import sync_playwright
 
-REVIEW_PATH = "comparison_review.json"
-PROJECT_URL = "https://notebooklm.google.com/notebook/82c34a38-cbc5-47fe-8001-36696f67d7fb"
+from config import CDP_URL, PROJECT_URL, REVIEW_PATH
 
 
 def get_sources_to_remove():
@@ -196,7 +195,7 @@ def run_delete():
     with sync_playwright() as p:
         try:
             print("--- Attempting to connect via CDP (Port 9222) ---")
-            browser = p.chromium.connect_over_cdp("http://localhost:9222")
+            browser = p.chromium.connect_over_cdp(CDP_URL)
             context = browser.contexts[0]
             page = context.pages[0]
             print("[OK] Connected to existing browser via CDP.")

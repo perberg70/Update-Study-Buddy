@@ -74,20 +74,26 @@ In that Chrome window, sign in to the Google account you use for NotebookLM.
 
 ### Full update (recommended)
 
-1. Put your edX course export in the project folder (filename set in `extract_edx.py`).
-2. From the project folder:
+1. Put your edX course export in the project folder (`course*.tar.gz`), or set `EDX_TAR_PATH`.
+2. (Optional but recommended) run preflight checks:
+
+```powershell
+python preflight.py
+```
+
+3. From the project folder:
 
 ```powershell
 python run_full_update.py
 ```
 
-3. The pipeline runs Phase 1, then pauses for you to review `comparison_review.json`.
-4. Edit actions as needed, save, press Enter. Phase 2 runs the deletions and uploads.
+4. The pipeline runs Phase 1, then pauses for you to review `comparison_review.json`.
+5. Edit actions as needed, save, press Enter. Phase 2 runs the deletions and uploads.
 
 ### Run individual steps
 
 - `python export_current_sources.py` — refresh `current_sources.json` only.
-- `python extract_edx.py` — extract and parse the `.tar.gz`.
+- `python extract_edx.py` — extract and parse the newest `course*.tar.gz` (or pass `--tar <file> --out <dir>`).
 - `python organize_content.py` — build organized content and manifest.
 - `python compare_sources.py` — generate `comparison_review.json` for review.
 - `python compare_sources.py --apply` — apply the reviewed plan (delete + upload).
@@ -102,7 +108,7 @@ python run_full_update.py
 Update Study Buddy/
 ├── run_full_update.py            # Main entry: two-phase pipeline with review pause
 ├── export_current_sources.py     # Step 0: scrape NotebookLM Sources → current_sources.json
-├── extract_edx.py                # Step 1: unpack .tar.gz → edx_export/ + course_structure.json
+├── extract_edx.py                # Step 1: unpack .tar.gz (safe extraction) → edx_export/ + course_structure.json
 ├── organize_content.py           # Step 2: build Organized_Course_Content/ + processing_manifest.json
 ├── compare_sources.py            # Step 3: compare & match → comparison_review.json; --apply to execute
 ├── delete_agent.py               # Step 4: remove sources (REPLACE / DELETE) from NotebookLM
@@ -117,10 +123,11 @@ Update Study Buddy/
 ├── Organized_Course_Content/     # Chapter folders with .txt and .mp3 (from organize)
 │
 ├── course.*.tar.gz               # Your edX export
+├── preflight.py                  # Optional environment/input validation
 └── README.md                     # This file
 ```
 
-**Notebook URL:** Hardcoded as `PROJECT_URL` in `export_current_sources.py`, `delete_agent.py`, and `upload_agent.py`. Edit that variable if you use a different notebook.
+**Notebook URL / CDP / limits:** Configurable via `config.py` and environment variables (`NOTEBOOKLM_PROJECT_URL`, `NOTEBOOKLM_CDP_URL`, `MAX_UPLOAD_SIZE_MB`, etc.).
 
 ---
 

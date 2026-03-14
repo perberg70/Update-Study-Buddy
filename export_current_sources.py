@@ -9,8 +9,7 @@ import re
 import sys
 from playwright.sync_api import sync_playwright
 
-CURRENT_SOURCES_FILE = "current_sources.json"
-PROJECT_URL = "https://notebooklm.google.com/notebook/82c34a38-cbc5-47fe-8001-36696f67d7fb"
+from config import CDP_URL, CURRENT_SOURCES_FILE, PROJECT_URL
 
 
 def run_export():
@@ -18,7 +17,7 @@ def run_export():
 
     with sync_playwright() as p:
         try:
-            browser = p.chromium.connect_over_cdp("http://localhost:9222")
+            browser = p.chromium.connect_over_cdp(CDP_URL)
             context = browser.contexts[0]
             page = context.pages[0]
             print("[OK] Connected via CDP.")

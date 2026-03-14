@@ -14,7 +14,7 @@ def run_script(name, args=None):
 
 def main():
     print("=" * 60)
-    print("  Study Buddy — Full Course Update")
+    print("  Study Buddy - Full Course Update")
     print("=" * 60)
 
     # ── Phase 1: Extract & Compare ──────────────────────────────
@@ -36,9 +36,9 @@ def main():
     print("  comparison_review.json has been generated.")
     print("  Open it in your editor and review / adjust the actions:")
     print()
-    print("    PAIRS        → REPLACE | DELETE | KEEP")
-    print("    CURRENT_ONLY → DELETE  | KEEP")
-    print("    NEW_ONLY     → ADD     | SKIP")
+    print("    PAIRS        -> REPLACE | DELETE | KEEP")
+    print("    CURRENT_ONLY -> DELETE  | KEEP")
+    print("    NEW_ONLY     -> ADD     | SKIP")
     print()
     print("  Save the file when done, then press Enter here.")
     print("=" * 60)
