@@ -4,10 +4,7 @@ import re
 import time
 from playwright.sync_api import sync_playwright
 
-MANIFEST_PATH = "processing_manifest.json"
-REVIEW_PATH = "comparison_review.json"
-PROJECT_URL = "https://notebooklm.google.com/notebook/82c34a38-cbc5-47fe-8001-36696f67d7fb"
-MAX_UPLOAD_SIZE_MB = 50
+from config import CDP_URL, MANIFEST_PATH, MAX_UPLOAD_SIZE_MB, PROJECT_URL, REVIEW_PATH
 
 
 def get_upload_plan():
@@ -84,7 +81,7 @@ def run_upload():
 
         try:
             print("--- Attempting to connect via CDP (Port 9222) ---")
-            browser = p.chromium.connect_over_cdp("http://localhost:9222")
+            browser = p.chromium.connect_over_cdp(CDP_URL)
             context = browser.contexts[0]
             page = context.pages[0]
             print("[OK] Connected to existing browser via CDP.")
