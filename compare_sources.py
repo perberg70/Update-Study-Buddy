@@ -11,9 +11,7 @@ import subprocess
 import sys
 from difflib import SequenceMatcher
 
-CURRENT_SOURCES_FILE = "current_sources.json"
-MANIFEST_PATH = "processing_manifest.json"
-REVIEW_PATH = "comparison_review.json"
+from config import CURRENT_SOURCES_FILE, MANIFEST_PATH, REVIEW_PATH
 
 STOP_WORDS = {"and", "the", "of", "in", "to", "a", "is", "for", "with", "on", "by", "an", "at", "or", "its"}
 MATCH_THRESHOLD = 0.35
