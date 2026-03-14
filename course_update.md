@@ -10,7 +10,7 @@ description: Autonomously processes a new edX course .tar.gz export, compares wi
    - `export_current_sources.py`: Connects via CDP, opens the notebook, scrapes the current source names from the sidebar, and writes `current_sources.json`. This keeps the list up to date at the start of every run.
    - `extract_edx.py`: Unpacks the `.tar.gz`.
    - `organize_content.py`: Downloads videos (fixing 403 errors), converts to MP3, and structures text by chapter.
-   - `compare_sources.py`: Compares new sources (from `processing_manifest.json`) with current NotebookLM sources (from `current_sources.json`). Writes `comparison_report.json` with ADD (new) vs REPLACE (old name to remove). **Requires** `current_sources.json` (no built-in list).
+   - `compare_sources.py`: Compares new sources (from `processing_manifest.json`) with current NotebookLM sources (from `current_sources.json`). Writes `comparison_review.json` with ADD (new) vs REPLACE (old name to remove). **Requires** `current_sources.json` (no built-in list).
    - `delete_agent.py`: Connects via CDP, opens the notebook, and removes each source marked REPLACE in the comparison report (More → Remove source → Delete).
    - `upload_agent.py`: Uploads all new sources to NoteBookLM (Upload files for documents/audio, Websites for URLs, Copied text for pasted content).
 
