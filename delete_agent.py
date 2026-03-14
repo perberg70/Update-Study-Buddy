@@ -78,6 +78,62 @@ def find_more_button_js(page, source_name):
     return None
 
 
+def find_sources_panel(page):
+    """Best-effort locator for the sources sidebar/panel used for scrolling."""
+    try:
+        add_btn = page.get_by_role(
+            "button", name=re.compile(r"(\+\s*)?Add\s+source|Lägg\s+till\s+källa", re.I)
+        ).first
+        panel = page.locator("section, [role='region'], aside, nav, [class*='sidebar'], [class*='panel']").filter(has=add_btn).first
+        panel.wait_for(state="visible", timeout=2_000)
+        return panel
+    except Exception:
+        return None
+
+
+def find_more_button_with_scroll(page, source_name, attempts=10):
+    """Try to locate a source's more button while scrolling a virtualized list."""
+    panel = find_sources_panel(page)
+
+    # First try without scrolling
+    btn = find_more_button_js(page, source_name)
+    if btn:
+        return btn
+
+    if not panel:
+        return None
+
+    # Sweep down
+    for _ in range(attempts):
+        btn = find_more_button_js(page, source_name)
+        if btn:
+            return btn
+        try:
+            panel.evaluate("el => el.scrollBy(0, 450)")
+        except Exception:
+            break
+        page.wait_for_timeout(250)
+
+    # Sweep up and retry
+    try:
+        panel.evaluate("el => { el.scrollTop = 0; }")
+        page.wait_for_timeout(250)
+    except Exception:
+        pass
+
+    for _ in range(max(3, attempts // 2)):
+        btn = find_more_button_js(page, source_name)
+        if btn:
+            return btn
+        try:
+            panel.evaluate("el => el.scrollBy(0, 350)")
+        except Exception:
+            break
+        page.wait_for_timeout(250)
+
+    return None
+
+
 def click_confirm_delete(page):
     """Find and click the confirm button in the delete dialog.
     Tries multiple strategies to handle English/Swedish variants."""
@@ -126,7 +182,7 @@ def delete_one_source(page, source_name):
     dismiss_overlays(page)
 
     # Find the More (three-dots) button for this source
-    more_btn = find_more_button_js(page, source_name)
+    more_btn = find_more_button_with_scroll(page, source_name)
 
     if not more_btn:
         # Fallback: locate by visible text → ancestor row → button
