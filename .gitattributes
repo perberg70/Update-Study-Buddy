@@ -1,0 +1,18 @@
+# Normalize text files to LF to avoid cross-platform merge noise
+* text=auto eol=lf
+
+# Explicit text types used in this repo
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.txt text eol=lf
+*.xml text eol=lf
+
+# Binary assets
+*.tar.gz binary
+*.mp3 binary
+*.mp4 binary
+*.pdf binary
+*.docx binary
+*.xlsx binary
+*.url text eol=crlf

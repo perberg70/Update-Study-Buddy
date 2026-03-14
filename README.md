@@ -141,6 +141,7 @@ Update Study Buddy/
 
 ## Troubleshooting
 
+- **Merge conflict after pull/rebase** — Keep generated artifacts out of commits and normalize line endings. This repo ships `.gitattributes`; run `git add --renormalize .` once, then commit. Resolve conflicts with `git status`, edit conflicted files, `git add <file>`, then continue with `git rebase --continue` or `git commit` for merge.
 - **"CDP connection failed"** — Start Chrome with `--remote-debugging-port=9222` and run the script again.
 - **"current_sources.json not found"** — Run `export_current_sources.py` first (with Chrome on 9222).
 - **"No edX export found"** — Place `course*.tar.gz` in the project folder, pass `--tar <file>`, or set `EDX_TAR_PATH`.
