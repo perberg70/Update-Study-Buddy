@@ -26,7 +26,18 @@ def load_current_sources():
     with open(CURRENT_SOURCES_FILE, "r", encoding="utf-8") as f:
         data = json.load(f)
     sources = data if isinstance(data, list) else data.get("sources", data.get("names", []))
-    return [s for s in sources if s and isinstance(s, str)]
+
+    # De-duplicate early so comparison_review.json has one row per source name.
+    unique = []
+    seen = set()
+    for source in sources:
+        if not source or not isinstance(source, str):
+            continue
+        key = normalize(source)
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(source)
+    return unique
 
 
 def load_manifest():
@@ -139,31 +150,36 @@ def generate_review():
                     "chapter": ch["chapter"],
                 })
 
-    # Match each new file to its best old source
-    pairs = []
-    matched_old = set()
-
+    # Compute all candidate matches, then greedily assign one-to-one pairs
+    # so neither side appears duplicated in comparison_review.json.
+    candidates = []
     for nf in new_files:
-        best_score = 0.0
-        best_old = None
         for cs in current_sources:
             score = compute_match_score(nf, cs)
-            if score > best_score:
-                best_score = score
-                best_old = cs
+            if score >= MATCH_THRESHOLD:
+                candidates.append((score, nf, cs))
 
-        if best_score >= MATCH_THRESHOLD and best_old:
-            pairs.append({
-                "new_name": nf["name"],
-                "new_path": nf["path"],
-                "new_type": nf["type"],
-                "chapter": nf["chapter"],
-                "old_name": best_old,
-                "match_score": best_score,
-                "match_reason": match_reason(nf["name"], best_old, best_score),
-                "action": "REPLACE",
-            })
-            matched_old.add(best_old)
+    candidates.sort(key=lambda c: c[0], reverse=True)
+
+    pairs = []
+    matched_old = set()
+    matched_new = set()
+    for score, nf, cs in candidates:
+        new_key = (nf["name"], nf["path"])
+        if new_key in matched_new or cs in matched_old:
+            continue
+        pairs.append({
+            "new_name": nf["name"],
+            "new_path": nf["path"],
+            "new_type": nf["type"],
+            "chapter": nf["chapter"],
+            "old_name": cs,
+            "match_score": score,
+            "match_reason": match_reason(nf["name"], cs, score),
+            "action": "REPLACE",
+        })
+        matched_new.add(new_key)
+        matched_old.add(cs)
 
     # New files that didn't match anything
     paired_keys = {(p["new_name"], p["new_path"]) for p in pairs}
@@ -225,13 +241,35 @@ def apply_review():
     with open(REVIEW_PATH, "r", encoding="utf-8") as f:
         review = json.load(f)
 
-    replace_n = sum(1 for p in review.get("pairs", []) if app_config.normalize_action(p.get("action", "")) == "REPLACE")
-    delete_pair = sum(1 for p in review.get("pairs", []) if app_config.normalize_action(p.get("action", "")) == "DELETE")
-    keep_pair = sum(1 for p in review.get("pairs", []) if app_config.normalize_action(p.get("action", "")) == "KEEP")
-    delete_only = sum(1 for c in review.get("current_only", []) if app_config.normalize_action(c.get("action", "")) == "DELETE")
-    keep_only = sum(1 for c in review.get("current_only", []) if app_config.normalize_action(c.get("action", "")) == "KEEP")
-    add_n = sum(1 for n in review.get("new_only", []) if app_config.normalize_action(n.get("action", "")) == "ADD")
-    skip_n = sum(1 for n in review.get("new_only", []) if app_config.normalize_action(n.get("action", "")) == "SKIP")
+    allowed_actions = {
+        "pairs": {"REPLACE", "DELETE", "KEEP"},
+        "current_only": {"DELETE", "KEEP"},
+        "new_only": {"ADD", "SKIP"},
+    }
+
+    invalid_rows = []
+    normalized = {"pairs": [], "current_only": [], "new_only": []}
+    for section, allowed in allowed_actions.items():
+        for idx, row in enumerate(review.get(section, []), start=1):
+            action = app_config.normalize_action(row.get("action", ""))
+            normalized[section].append(action)
+            if action not in allowed:
+                invalid_rows.append((section, idx, row.get("action", ""), sorted(allowed)))
+
+    if invalid_rows:
+        print("[FAIL] Invalid action(s) found in comparison_review.json:")
+        for section, idx, raw, allowed in invalid_rows:
+            print(f"  - {section}[{idx}]: {raw!r} (allowed: {', '.join(allowed)})")
+        print("[FAIL] Aborting apply step. Fix actions in comparison_review.json and rerun.")
+        sys.exit(1)
+
+    replace_n = sum(1 for a in normalized["pairs"] if a == "REPLACE")
+    delete_pair = sum(1 for a in normalized["pairs"] if a == "DELETE")
+    keep_pair = sum(1 for a in normalized["pairs"] if a == "KEEP")
+    delete_only = sum(1 for a in normalized["current_only"] if a == "DELETE")
+    keep_only = sum(1 for a in normalized["current_only"] if a == "KEEP")
+    add_n = sum(1 for a in normalized["new_only"] if a == "ADD")
+    skip_n = sum(1 for a in normalized["new_only"] if a == "SKIP")
 
     total_delete = replace_n + delete_pair + delete_only
     total_upload = replace_n + add_n
