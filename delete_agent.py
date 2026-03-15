@@ -6,9 +6,9 @@ import json
 import os
 import re
 import sys
-from config import CDP_URL, PROJECT_URL, REVIEW_PATH
-import config as app_config
+
 from config import CDP_URL, PROJECT_URL, REVIEW_PATH, normalize_action
+
 
 def _get_name(item: dict) -> str:
     """Best-effort source name extraction from review rows."""
@@ -19,7 +19,6 @@ def _get_name(item: dict) -> str:
         or item.get("title")
         or ""
     )
-from config import CDP_URL, PROJECT_URL, REVIEW_PATH, normalize_action
 
 
 def get_sources_to_remove():
@@ -27,41 +26,32 @@ def get_sources_to_remove():
     if not os.path.exists(REVIEW_PATH):
         print(f"[WARN] {REVIEW_PATH} not found. Nothing to delete.")
         return []
+
     with open(REVIEW_PATH, "r", encoding="utf-8") as f:
         review = json.load(f)
 
     names = []
     seen = set()
-
-    for pair in review.get("pairs", []):
-        action = app_config.normalize_action(pair.get("action", ""))
-        old = _get_name(pair)
-        action = normalize_action(pair.get("action", ""))
-        old = _get_name(pair)
-        old = pair.get("old_name")
-        if old and action in ("REPLACE", "DELETE") and old not in seen:
-            seen.add(old)
-            names.append(old)
-
     delete_pairs = 0
     delete_current_only = 0
 
-    for item in review.get("current_only", []):
-        action = app_config.normalize_action(item.get("action", ""))
-        name = _get_name(item)
-        action = normalize_action(item.get("action", ""))
-        name = _get_name(item)
-        name = item.get("name")
-        if name and action == "DELETE" and name not in seen:
-            seen.add(name)
-            names.append(name)
-            delete_current_only += 1
-
     for pair in review.get("pairs", []):
-        action = app_config.normalize_action(pair.get("action", ""))
         action = normalize_action(pair.get("action", ""))
+        old_name = _get_name(pair)
         if action in ("REPLACE", "DELETE"):
             delete_pairs += 1
+            if old_name and old_name not in seen:
+                seen.add(old_name)
+                names.append(old_name)
+
+    for item in review.get("current_only", []):
+        action = normalize_action(item.get("action", ""))
+        name = _get_name(item)
+        if action == "DELETE":
+            delete_current_only += 1
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
 
     print(
         f"[PLAN] Review delete actions: pairs={delete_pairs}, current_only={delete_current_only}, unique_sources={len(names)}"
