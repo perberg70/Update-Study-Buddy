@@ -1,14 +1,18 @@
 """
-Remove sources from NotebookLM based on comparison_review.json.
-Deletes ALL copies of each source name (handles duplicates).
+Remove sources from NotebookLM.
+
+Modes:
+- Default: remove sources from comparison_review.json (REPLACE / DELETE actions).
+- --dedupe-current: remove duplicate copies from current_sources.json, keeping one copy per source.
 """
 import json
 import os
 import re
 import sys
-from config import CDP_URL, PROJECT_URL, REVIEW_PATH
-import config as app_config
-from config import CDP_URL, PROJECT_URL, REVIEW_PATH, normalize_action
+from collections import Counter
+
+from config import CDP_URL, CURRENT_SOURCES_FILE, PROJECT_URL, REVIEW_PATH, normalize_action
+
 
 def _get_name(item: dict) -> str:
     """Best-effort source name extraction from review rows."""
@@ -19,7 +23,13 @@ def _get_name(item: dict) -> str:
         or item.get("title")
         or ""
     )
-from config import CDP_URL, PROJECT_URL, REVIEW_PATH, normalize_action
+
+
+def _canonical_name(name: str) -> str:
+    """Canonical key for duplicate detection in exported source names."""
+    if not isinstance(name, str):
+        return ""
+    return re.sub(r"\s+", " ", name).strip().lower()
 
 
 def get_sources_to_remove():
@@ -27,46 +37,77 @@ def get_sources_to_remove():
     if not os.path.exists(REVIEW_PATH):
         print(f"[WARN] {REVIEW_PATH} not found. Nothing to delete.")
         return []
+
     with open(REVIEW_PATH, "r", encoding="utf-8") as f:
         review = json.load(f)
 
     names = []
     seen = set()
-
-    for pair in review.get("pairs", []):
-        action = app_config.normalize_action(pair.get("action", ""))
-        old = _get_name(pair)
-        action = normalize_action(pair.get("action", ""))
-        old = _get_name(pair)
-        old = pair.get("old_name")
-        if old and action in ("REPLACE", "DELETE") and old not in seen:
-            seen.add(old)
-            names.append(old)
-
     delete_pairs = 0
     delete_current_only = 0
 
-    for item in review.get("current_only", []):
-        action = app_config.normalize_action(item.get("action", ""))
-        name = _get_name(item)
-        action = normalize_action(item.get("action", ""))
-        name = _get_name(item)
-        name = item.get("name")
-        if name and action == "DELETE" and name not in seen:
-            seen.add(name)
-            names.append(name)
-            delete_current_only += 1
-
     for pair in review.get("pairs", []):
-        action = app_config.normalize_action(pair.get("action", ""))
         action = normalize_action(pair.get("action", ""))
+        old_name = _get_name(pair)
         if action in ("REPLACE", "DELETE"):
             delete_pairs += 1
+            if old_name and old_name not in seen:
+                seen.add(old_name)
+                names.append(old_name)
+
+    for item in review.get("current_only", []):
+        action = normalize_action(item.get("action", ""))
+        name = _get_name(item)
+        if action == "DELETE":
+            delete_current_only += 1
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
 
     print(
         f"[PLAN] Review delete actions: pairs={delete_pairs}, current_only={delete_current_only}, unique_sources={len(names)}"
     )
-    return names
+    return [{"name": n, "max_deletions": None} for n in names]
+
+
+def get_duplicate_sources_to_remove():
+    """Build deletion plan to remove only duplicates from current_sources.json.
+
+    Keeps one copy per canonicalized name and removes the extra copies.
+    """
+    if not os.path.exists(CURRENT_SOURCES_FILE):
+        print(f"[WARN] {CURRENT_SOURCES_FILE} not found. Run export_current_sources.py first.")
+        return []
+
+    with open(CURRENT_SOURCES_FILE, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    sources = data if isinstance(data, list) else data.get("sources", data.get("names", []))
+
+    counts = Counter()
+    representative = {}
+    for source in sources:
+        if not source or not isinstance(source, str):
+            continue
+        key = _canonical_name(source)
+        if not key:
+            continue
+        counts[key] += 1
+        representative.setdefault(key, source.strip())
+
+    plan = []
+    total_duplicates = 0
+    for key, count in counts.items():
+        if count > 1:
+            remove_count = count - 1
+            total_duplicates += remove_count
+            plan.append({"name": representative[key], "max_deletions": remove_count})
+
+    print(
+        f"[PLAN] Duplicate cleanup from {CURRENT_SOURCES_FILE}: "
+        f"duplicate_names={len(plan)}, duplicate_copies={total_duplicates}"
+    )
+    return plan
 
 
 def dismiss_overlays(page):
@@ -157,7 +198,6 @@ def find_more_button_with_scroll(page, source_name, attempts=10):
     """Try to locate a source's more button while scrolling a virtualized list."""
     panel = find_sources_panel(page)
 
-    # First try without scrolling
     btn = find_more_button_js(page, source_name)
     if btn:
         return btn
@@ -165,7 +205,6 @@ def find_more_button_with_scroll(page, source_name, attempts=10):
     if not panel:
         return None
 
-    # Sweep down
     for _ in range(attempts):
         btn = find_more_button_js(page, source_name)
         if btn:
@@ -176,7 +215,6 @@ def find_more_button_with_scroll(page, source_name, attempts=10):
             break
         page.wait_for_timeout(250)
 
-    # Sweep up and retry
     try:
         panel.evaluate("el => { el.scrollTop = 0; }")
         page.wait_for_timeout(250)
@@ -201,7 +239,6 @@ def click_confirm_delete(page):
     Tries multiple strategies to handle English/Swedish variants."""
     page.wait_for_timeout(600)
 
-    # Strategy 1: role-based with broad regex
     try:
         btn = page.get_by_role(
             "button", name=re.compile(r"Delete|Remove|Ta bort|Radera", re.I)
@@ -212,7 +249,6 @@ def click_confirm_delete(page):
     except Exception:
         pass
 
-    # Strategy 2: find buttons inside the dialog overlay
     try:
         dialog_btns = page.locator(
             ".cdk-overlay-container mat-dialog-actions button, "
@@ -226,7 +262,6 @@ def click_confirm_delete(page):
     except Exception:
         pass
 
-    # Strategy 3: any button with delete-ish text anywhere in the overlay
     try:
         overlay_btn = page.locator(".cdk-overlay-container").get_by_role(
             "button", name=re.compile(r"Delete|Remove|Ta bort|Radera|OK|Confirm", re.I)
@@ -243,11 +278,9 @@ def delete_one_source(page, source_name):
     """Delete a single copy of *source_name* from the notebook. Returns True on success."""
     dismiss_overlays(page)
 
-    # Find the More (three-dots) button for this source
     more_btn = find_more_button_with_scroll(page, source_name)
 
     if not more_btn:
-        # Fallback: locate by visible text/token(s) -> ancestor row -> local button
         queries = [source_name]
         parts = [p for p in re.split(r"[^A-Za-z0-9ÅÄÖåäö]+", source_name) if len(p) >= 4]
         if parts:
@@ -280,7 +313,6 @@ def delete_one_source(page, source_name):
     more_btn.click(timeout=5_000)
     page.wait_for_timeout(600)
 
-    # Click "Remove source" in the context menu
     try:
         remove_item = page.get_by_role(
             "menuitem", name=re.compile(r"Remove|Ta bort", re.I)
@@ -288,7 +320,6 @@ def delete_one_source(page, source_name):
         remove_item.wait_for(state="visible", timeout=3_000)
         remove_item.click(timeout=5_000)
     except Exception:
-        # Fallback: any menu item in the overlay
         try:
             menu_items = page.locator(".cdk-overlay-container .mat-mdc-menu-item, .cdk-overlay-container [mat-menu-item]")
             for i in range(menu_items.count()):
@@ -302,7 +333,6 @@ def delete_one_source(page, source_name):
 
     page.wait_for_timeout(600)
 
-    # Confirm the delete in the dialog
     if not click_confirm_delete(page):
         dismiss_overlays(page)
         return False
@@ -311,18 +341,21 @@ def delete_one_source(page, source_name):
     return True
 
 
-def run_delete(dry_run: bool = False):
-    to_remove = get_sources_to_remove()
-    if not to_remove:
+def _execute_deletion_plan(plan, dry_run: bool = False):
+    if not plan:
         print("--- No sources to remove. ---")
         return
 
-    print(f"--- Removing {len(to_remove)} unique source name(s) from NotebookLM ---")
+    print(f"--- Removing {len(plan)} source name(s) from NotebookLM ---")
 
     if dry_run:
         print("[DRY-RUN] Parsed delete plan only. No browser actions executed.")
-        for name in to_remove:
-            print(f"   [PLAN] {name}")
+        for item in plan:
+            limit = item.get("max_deletions")
+            if limit is None:
+                print(f"   [PLAN] {item['name']} (remove all copies)")
+            else:
+                print(f"   [PLAN] {item['name']} (remove {limit} duplicate copies)")
         return
 
     try:
@@ -330,8 +363,9 @@ def run_delete(dry_run: bool = False):
     except Exception as exc:
         print(f"[FAIL] Playwright is required for deletion automation: {exc}")
         return
-    for name in to_remove:
-        print(f"   [QUEUED] {name}")
+
+    for item in plan:
+        print(f"   [QUEUED] {item['name']}")
 
     with sync_playwright() as p:
         try:
@@ -353,9 +387,12 @@ def run_delete(dry_run: bool = False):
         ).first.wait_for(state="visible", timeout=30_000)
 
         total_removed = 0
-        for source_name in to_remove:
+        for item in plan:
+            source_name = item["name"]
+            max_deletions = item.get("max_deletions")
+
             copies = 0
-            while copies < 10:
+            while copies < (max_deletions if max_deletions is not None else 10):
                 try:
                     if delete_one_source(page, source_name):
                         copies += 1
@@ -364,6 +401,7 @@ def run_delete(dry_run: bool = False):
                 except Exception:
                     dismiss_overlays(page)
                     break
+
             total_removed += copies
             if copies > 0:
                 extra = f" ({copies} copies)" if copies > 1 else ""
@@ -374,5 +412,21 @@ def run_delete(dry_run: bool = False):
         print(f"\n--- Removed {total_removed} source(s) total. ---")
 
 
+def run_delete(dry_run: bool = False):
+    plan = get_sources_to_remove()
+    _execute_deletion_plan(plan, dry_run=dry_run)
+
+
+def run_dedupe_current_sources(dry_run: bool = False):
+    plan = get_duplicate_sources_to_remove()
+    _execute_deletion_plan(plan, dry_run=dry_run)
+
+
 if __name__ == "__main__":
-    run_delete(dry_run="--dry-run" in sys.argv)
+    dry_run = "--dry-run" in sys.argv
+    dedupe_current = "--dedupe-current" in sys.argv
+
+    if dedupe_current:
+        run_dedupe_current_sources(dry_run=dry_run)
+    else:
+        run_delete(dry_run=dry_run)

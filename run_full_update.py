@@ -1,5 +1,4 @@
 import subprocess
-import os
 import sys
 
 def run_script(name, args=None):
@@ -17,7 +16,11 @@ def main():
     print("  Study Buddy - Full Course Update")
     print("=" * 60)
 
-    # ── Phase 1: Extract & Compare ──────────────────────────────
+    # ── Phase 1: Export + duplicate cleanup + compare inputs ────
+    if not run_script("export_current_sources.py"):
+        return
+    if not run_script("delete_agent.py", ["--dedupe-current"]):
+        return
     if not run_script("export_current_sources.py"):
         return
     if not run_script("extract_edx.py"):

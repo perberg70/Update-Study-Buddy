@@ -21,9 +21,11 @@ The pipeline runs in two phases when you execute `run_full_update.py`:
 | Step | Script | What it does |
 |------|--------|--------------|
 | **0** | `export_current_sources.py` | Connects to Chrome (CDP), opens your NotebookLM notebook, scrapes the **Sources** panel, and writes `current_sources.json`. |
-| **1** | `extract_edx.py` | Extracts the edX `.tar.gz` into `edx_export/` and parses course structure into `course_structure.json`. |
-| **2** | `organize_content.py` | Builds `Organized_Course_Content/` by chapter: merges HTML into `.txt`, downloads video assets and converts to MP3, writes `processing_manifest.json`. |
-| **3** | `compare_sources.py` | Matches new files against current notebook sources by **name similarity** and **content keywords**. Writes `comparison_review.json` with suggested actions. |
+| **1** | `delete_agent.py --dedupe-current` | Removes duplicate copies in the notebook based on `current_sources.json`, keeping one copy per source name. |
+| **2** | `export_current_sources.py` | Re-exports the notebook source list after duplicate cleanup, so comparison uses the cleaned state. |
+| **3** | `extract_edx.py` | Extracts the edX `.tar.gz` into `edx_export/` and parses course structure into `course_structure.json`. |
+| **4** | `organize_content.py` | Builds `Organized_Course_Content/` by chapter: merges HTML into `.txt`, downloads video assets and converts to MP3, writes `processing_manifest.json`. |
+| **5** | `compare_sources.py` | Compares cleaned notebook sources vs edX content and writes `comparison_review.json` with suggested actions (`REPLACE`, `ADD`, `KEEP`, etc.). |
 
 ### Review pause
 
@@ -46,8 +48,8 @@ Save the file and press Enter in the terminal to continue.
 
 | Step | Script | What it does |
 |------|--------|--------------|
-| **4** | `delete_agent.py` | Reads `comparison_review.json`. Deletes **all copies** of each source marked REPLACE or DELETE from the notebook. |
-| **5** | `upload_agent.py` | Reads `comparison_review.json`. Uploads only files marked REPLACE or ADD. Falls back to full manifest if no review file exists. |
+| **6** | `delete_agent.py` | Reads `comparison_review.json`. Deletes **all copies** of each source marked REPLACE or DELETE from the notebook. |
+| **7** | `upload_agent.py` | Reads `comparison_review.json`. Uploads only files marked REPLACE or ADD. Falls back to full manifest if no review file exists. |
 
 If any step fails (non-zero exit), the pipeline stops.
 
@@ -93,6 +95,7 @@ python run_full_update.py
 ### Run individual steps
 
 - `python export_current_sources.py` — refresh `current_sources.json` only.
+- `python delete_agent.py --dedupe-current` — remove duplicate copies in the current notebook using `current_sources.json` counts (keeps one copy per source name).
 - `python extract_edx.py` — extract and parse the newest `course*.tar.gz` (or pass `--tar <file> --out <dir>`).
 - `python organize_content.py` — build organized content and manifest.
 - `python compare_sources.py` — generate `comparison_review.json` for review.
@@ -107,13 +110,13 @@ python run_full_update.py
 
 ```
 Update Study Buddy/
-├── run_full_update.py            # Main entry: two-phase pipeline with review pause
-├── export_current_sources.py     # Step 0: scrape NotebookLM Sources → current_sources.json
-├── extract_edx.py                # Step 1: unpack .tar.gz (safe extraction) → edx_export/ + course_structure.json
-├── organize_content.py           # Step 2: build Organized_Course_Content/ + processing_manifest.json
-├── compare_sources.py            # Step 3: compare & match → comparison_review.json; --apply to execute
-├── delete_agent.py               # Step 4: remove sources (REPLACE / DELETE) from NotebookLM
-├── upload_agent.py               # Step 5: upload sources (REPLACE / ADD) to NotebookLM
+├── run_full_update.py            # Main entry: export, dedupe-current, compare, review, apply
+├── export_current_sources.py     # Step 0/2: scrape NotebookLM Sources → current_sources.json
+├── delete_agent.py               # Step 1: dedupe current notebook sources (--dedupe-current); Step 6 during apply
+├── extract_edx.py                # Step 3: unpack .tar.gz (safe extraction) → edx_export/ + course_structure.json
+├── organize_content.py           # Step 4: build Organized_Course_Content/ + processing_manifest.json
+├── compare_sources.py            # Step 5: compare & match → comparison_review.json; --apply executes Step 6-7
+├── upload_agent.py               # Step 7: upload sources (REPLACE / ADD) to NotebookLM
 │
 ├── current_sources.json          # Current source names in the notebook (from export)
 ├── course_structure.json         # Course structure tree (from extract)
