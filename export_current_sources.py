@@ -1,67 +1,101 @@
 """
 Export the current list of source names from the NotebookLM notebook to current_sources.json.
-Run with Chrome open: chrome.exe --remote-debugging-port=9222, and the notebook open (or we navigate to it).
-This keeps current_sources.json up to date so compare_sources.py can use it.
+
+Chrome: --remote-debugging-port=9222. Config: config.py (PROJECT_URL, CDP_URL, CURRENT_SOURCES_FILE).
+
+Flow (GitHub simplicity + reliability):
+1) Connect, prefer a tab already on notebooklm.google.com.
+2) Try the fast path: wait for Add source on the main Playwright page (same as GitHub).
+3) Click Sources / Källor tab and retry (sidebar often hidden until then).
+4) If still missing, poll every frame — the sidebar sometimes lives in an iframe.
 """
+from __future__ import annotations
+
 import json
-import os
 import re
 import sys
+
 from playwright.sync_api import sync_playwright
 
-CURRENT_SOURCES_FILE = "current_sources.json"
-PROJECT_URL = "https://notebooklm.google.com/notebook/82c34a38-cbc5-47fe-8001-36696f67d7fb"
+from config import CDP_URL, CURRENT_SOURCES_FILE, PROJECT_URL
+from delete_agent import find_best_sources_frame
+from notebook_ready import ADD_SOURCE_BTN, pick_notebook_page, resolve_sidebar_frame
+from notebooklm_sources import (
+    extract_sources_from_panel_text,
+    get_sidebar_panel_text_js,
+    is_notebook_placeholder_title,
+)
 
 
-def run_export():
+def run_export() -> None:
     print("--- Exporting current NotebookLM sources to", CURRENT_SOURCES_FILE, "---")
 
     with sync_playwright() as p:
         try:
-            browser = p.chromium.connect_over_cdp("http://localhost:9222")
-            context = browser.contexts[0]
-            page = context.pages[0]
+            browser = p.chromium.connect_over_cdp(CDP_URL)
+            page = pick_notebook_page(browser)
             print("[OK] Connected via CDP.")
         except Exception as e:
             print(f"[FAIL] CDP connection failed: {e}")
-            print("Start Chrome with:  & \"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\" --remote-debugging-port=9222")
+            try:
+                _p = CDP_URL.rsplit(":", 1)[-1].split("/")[0]
+            except IndexError:
+                _p = "9222"
+            print(
+                'Start Chrome with:  & "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" '
+                f"--remote-debugging-port={_p}"
+            )
             sys.exit(1)
 
         page.goto(PROJECT_URL, wait_until="domcontentloaded")
         page.wait_for_load_state("load")
-
-        page.get_by_role("button", name=re.compile(r"(\+\s*)?Add\s+source|Lägg\s+till\s+källa", re.I)).first.wait_for(
-            state="visible", timeout=30_000
-        )
-        page.wait_for_timeout(2000)
-
-        # Scroll the Sources panel so all items are in DOM (virtual list)
         try:
-            panel = page.locator('section, [role="region"], [class*="sidebar"], [class*="source"]').filter(has=page.get_by_text(re.compile(r"Add\s+source|Sources|Källor", re.I))).first
+            page.bring_to_front()
+        except Exception:
+            pass
+
+        export_frame = resolve_sidebar_frame(page)
+        if export_frame is None:
+            print(
+                "[FAIL] Could not find Add source / Lägg till (main frame or iframe).\n"
+                "       Chrome (9222): stay logged in, open this notebook, then retry.\n"
+                f"       URL: {PROJECT_URL}"
+            )
+            sys.exit(1)
+        # Prefer the frame whose sidebar text parses to the most rows (matches delete_agent).
+        try:
+            export_frame = find_best_sources_frame(page)
+        except Exception:
+            pass
+        page.wait_for_timeout(1500)
+
+        try:
+            panel = export_frame.locator(
+                'section, [role="region"], [class*="sidebar"], [class*="source"], aside, nav'
+            ).filter(
+                has=export_frame.get_by_text(re.compile(r"Add\s+sources?|Sources|Källor|Lägg", re.I))
+            ).first
             for _ in range(8):
                 panel.evaluate("el => el.scrollBy(0, 350)")
                 page.wait_for_timeout(250)
         except Exception:
             pass
 
-        # Icon/UI labels to exclude (Material icons, controls) – not real source names
         IGNORE_TOKENS = {
             "description", "more_vert", "drive_pdf", "video_audio_call", "video_youtube",
             "more", "mer", "add", "lägg", "sources", "källor", "insert_drive_file",
             "link", "content_copy", "upload", "folder", "image", "article",
             "keyboard_arrow_down", "expand_more", "expand_less", "arrow_drop_down",
         }
-        # Full phrases / UI labels that must not appear as source names (exact or contained)
         UI_PHRASES_EXCLUDE = {
             "select all sources", "keyboard arrow down", "keyboard_arrow_down",
             "välj alla källor", "video_audio_call", "video_youtube", "drive_pdf",
         }
 
-        # Scrape only from the Sources panel: find list items and get the actual source title (aria-labelledby or main text minus icons)
-        sources = page.evaluate("""(ignoreTokens) => {
+        sources = export_frame.evaluate(
+            """(ignoreTokens) => {
             const ignore = new Set((ignoreTokens || []).map(s => s.toLowerCase()));
             const out = [];
-            // Find the Sources section: region that contains "Add source" / "Sources" and has the source list
             const addBtn = Array.from(document.querySelectorAll('button, [role="button"]')).find(b => /add\\s+source|sources|källor|lägg\\s+till/i.test(b.textContent || b.getAttribute('aria-label') || ''));
             const sourcesPanel = addBtn ? addBtn.closest('section, [role="region"], aside, nav, [class*="sidebar"], [class*="panel"], [class*="source"]') || document : document;
 
@@ -83,7 +117,6 @@ def run_export():
 
             if (out.length) return [...new Set(out)];
 
-            // Fallback 1: rows that contain a More/menu button – the row text is the source name
             const withMenu = sourcesPanel.querySelectorAll('[aria-label*="More"], [aria-label*="Mer"], button[aria-label], [class*="more"]');
             const seen = new Set();
             withMenu.forEach(btn => {
@@ -100,21 +133,23 @@ def run_export():
             });
             if (out.length) return [...new Set(out)];
 
-            // Fallback 2: any labelled spans/divs in the panel that look like titles (longer text, not buttons)
             const allLabels = sourcesPanel.querySelectorAll('[id][id*="label"], [aria-label], [class*="title"], [class*="name"]');
             allLabels.forEach(el => {
                 const t = (el.textContent || el.getAttribute('aria-label') || '').trim();
                 if (t.length > 4 && !ignore.has(t.toLowerCase()) && !/^\\d+$/.test(t)) out.push(t);
             });
             return [...new Set(out)];
-        }""", IGNORE_TOKENS)
+        }""",
+            IGNORE_TOKENS,
+        )
 
         if not sources or not isinstance(sources, list):
             sources = []
 
-        # Filter: must look like a real source name (not just an icon word or UI phrase)
         def is_likely_source_name(s):
             if not s or len(s) < 2:
+                return False
+            if is_notebook_placeholder_title(s):
                 return False
             s_lower = s.lower()
             if s_lower in IGNORE_TOKENS:
@@ -128,10 +163,9 @@ def run_export():
         sources = [s.strip() for s in sources if isinstance(s, str) and is_likely_source_name(s.strip())]
         sources = list(dict.fromkeys(sources))
 
-        # Python fallback 1: listitem text
         if not sources or all(len(s) < 5 for s in sources):
             try:
-                items = page.locator('[role="listitem"]')
+                items = export_frame.locator('[role="listitem"]')
                 n = items.count()
                 for i in range(n):
                     el = items.nth(i)
@@ -145,17 +179,20 @@ def run_export():
             except Exception:
                 pass
 
-        # Python fallback 2: get ALL visible text from the Sources panel (via JS from Add source button) and parse lines
         if not sources or all(len(s) < 5 for s in sources):
             try:
-                full_text = page.evaluate("""() => {
+                full_text = export_frame.evaluate("""() => {
                     const btn = Array.from(document.querySelectorAll('button, [role="button"]')).find(b => /add\\s+source|sources|källor|lägg/i.test(b.textContent || b.getAttribute('aria-label') || ''));
                     if (!btn) return '';
                     const panel = btn.closest('section') || btn.closest('aside') || btn.closest('[class*="sidebar"]') || btn.closest('[class*="panel"]') || btn.closest('nav') || btn.parentElement?.parentElement?.parentElement;
                     return panel ? panel.innerText : '';
                 }""")
                 if full_text and isinstance(full_text, str):
-                    ui_phrases = {"add source", "add sources", "sources", "källor", "lägg till källa", "upload files", "websites", "drive", "copied text", "ladda upp", "webbplatser", "more", "mer", "select all sources", "keyboard arrow down", "välj alla källor"}
+                    ui_phrases = {
+                        "add source", "add sources", "sources", "källor", "lägg till källa", "upload files",
+                        "websites", "drive", "copied text", "ladda upp", "webbplatser", "more", "mer",
+                        "select all sources", "keyboard arrow down", "välj alla källor",
+                    }
                     for line in full_text.splitlines():
                         line = line.strip()
                         if not line or len(line) < 3:
@@ -172,13 +209,16 @@ def run_export():
             except Exception:
                 pass
 
-        # Python fallback 3: same but with Playwright locator for panel
         if not sources or all(len(s) < 5 for s in sources):
             try:
-                add_btn = page.get_by_role("button", name=re.compile(r"(\+\s*)?Add\s+source|Lägg\s+till\s+källa", re.I)).first
-                panel = page.locator("section, [role='region'], aside, nav").filter(has=add_btn).first
+                add_btn = export_frame.get_by_role("button", name=ADD_SOURCE_BTN).first
+                panel = export_frame.locator("section, [role='region'], aside, nav").filter(has=add_btn).first
                 full_text = panel.inner_text(timeout=5000)
-                ui_phrases = {"add source", "add sources", "sources", "källor", "lägg till källa", "upload files", "websites", "drive", "copied text", "ladda upp", "webbplatser", "more", "mer", "select all sources", "keyboard arrow down", "välj alla källor"}
+                ui_phrases = {
+                    "add source", "add sources", "sources", "källor", "lägg till källa", "upload files",
+                    "websites", "drive", "copied text", "ladda upp", "webbplatser", "more", "mer",
+                    "select all sources", "keyboard arrow down", "välj alla källor",
+                }
                 for line in full_text.splitlines():
                     line = line.strip()
                     if not line or len(line) < 3 or line.lower() in ui_phrases:
@@ -191,12 +231,29 @@ def run_export():
             except Exception:
                 pass
 
-        # Final filter: remove any UI/icon names that slipped in from fallbacks
         sources = [s.strip() for s in sources if isinstance(s, str) and is_likely_source_name(s.strip())]
         sources = list(dict.fromkeys(sources))
 
+        # Virtualized / non–list-item sidebars: scroll + merge innerText (same strategy as delete_agent /
+        # read_notebook_sources). Prefer this when it yields more titles than role=listitem scraping.
+        merged: list[str] = []
+        try:
+            panel_text = str(export_frame.evaluate(get_sidebar_panel_text_js()) or "")
+            merged = extract_sources_from_panel_text(panel_text, unique=True)
+            merged = [s.strip() for s in merged if isinstance(s, str) and is_likely_source_name(s.strip())]
+            merged = list(dict.fromkeys(merged))
+        except Exception as exc:
+            print(f"[WARN] Scroll-merge sidebar scrape failed: {exc}")
+
+        if len(merged) > len(sources):
+            sources = merged
+            print(
+                f"[INFO] Using scroll-merged sidebar text ({len(sources)} title(s)); "
+                "listitem / plain innerText path had fewer."
+            )
+
         if not sources:
-            debug_text = page.evaluate("""() => {
+            debug_text = export_frame.evaluate("""() => {
                 const btn = Array.from(document.querySelectorAll('button, [role="button"]')).find(b => /add\\s+source|sources|källor|lägg/i.test(b.textContent || b.getAttribute('aria-label') || ''));
                 const panel = btn ? (btn.closest('section') || btn.closest('aside') || btn.closest('[class*="sidebar"]') || btn.parentElement?.parentElement) : null;
                 return panel ? panel.innerText : (document.body?.innerText || '').slice(0, 8000);
