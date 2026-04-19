@@ -1,13 +1,17 @@
 """
-Remove sources from NotebookLM based on comparison_review.json.
-Deletes ALL copies of each source name (handles duplicates).
+Remove sources from NotebookLM.
+
+Modes:
+- Default: remove sources from comparison_review.json (REPLACE / DELETE actions).
+- --dedupe-current: remove duplicate copies from current_sources.json, keeping one copy per source.
 """
 import json
 import os
 import re
 import sys
 
-from config import CDP_URL, PROJECT_URL, REVIEW_PATH, normalize_action
+from config import CDP_URL, CURRENT_SOURCES_FILE, PROJECT_URL, REVIEW_PATH, normalize_action
+
 
 
 def _get_name(item: dict) -> str:
@@ -19,6 +23,13 @@ def _get_name(item: dict) -> str:
         or item.get("title")
         or ""
     )
+
+
+def _canonical_name(name: str) -> str:
+    """Canonical key for duplicate detection in exported source names."""
+    if not isinstance(name, str):
+        return ""
+    return re.sub(r"\s+", " ", name).strip().lower()
 
 
 def get_sources_to_remove():
@@ -56,7 +67,82 @@ def get_sources_to_remove():
     print(
         f"[PLAN] Review delete actions: pairs={delete_pairs}, current_only={delete_current_only}, unique_sources={len(names)}"
     )
-    return names
+    return [{"name": n, "max_deletions": None} for n in names]
+
+
+def get_duplicate_sources_to_remove():
+    """Build deletion plan for duplicate cleanup mode.
+
+    current_sources.json may already be deduplicated by export_current_sources.py,
+    so this plan intentionally includes every unique source name and lets the
+    browser-side execution determine how many duplicate copies actually exist.
+    """
+    if not os.path.exists(CURRENT_SOURCES_FILE):
+        print(f"[WARN] {CURRENT_SOURCES_FILE} not found. Run export_current_sources.py first.")
+        return []
+
+    with open(CURRENT_SOURCES_FILE, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    sources = data if isinstance(data, list) else data.get("sources", data.get("names", []))
+
+    representative = {}
+    for source in sources:
+        if not source or not isinstance(source, str):
+            continue
+        key = _canonical_name(source)
+        if not key:
+            continue
+        representative.setdefault(key, source.strip())
+
+    plan = [{"name": name, "max_deletions": None, "keep_one_copy": True} for name in representative.values()]
+
+    print(
+        f"[PLAN] Duplicate cleanup from {CURRENT_SOURCES_FILE}: "
+        f"candidate_names={len(plan)} (live duplicate counts resolved in NotebookLM UI)"
+    )
+    return plan
+
+
+def count_source_occurrences(page, source_name):
+    """Count how many rows in the current UI match *source_name*."""
+    try:
+        return int(page.evaluate("""(name) => {
+            const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9åäö]+/g, ' ').replace(/\\s+/g, ' ').trim();
+            const hasTokenOverlap = (a, b) => {
+                const ta = new Set(norm(a).split(' ').filter(x => x.length > 2));
+                const tb = new Set(norm(b).split(' ').filter(x => x.length > 2));
+                if (!ta.size || !tb.size) return false;
+                let overlap = 0;
+                for (const t of ta) if (tb.has(t)) overlap += 1;
+                return overlap >= Math.min(2, Math.max(1, Math.floor(tb.size / 2)));
+            };
+
+            const target = norm(name);
+            if (!target) return 0;
+
+            let matches = 0;
+            const btns = document.querySelectorAll('button[aria-description]');
+            btns.forEach(btn => {
+                const desc = norm(btn.getAttribute('aria-description') || '');
+                if (desc && (desc === target || desc.includes(target) || target.includes(desc) || hasTokenOverlap(desc, target))) {
+                    matches += 1;
+                }
+            });
+            if (matches > 0) return matches;
+
+            const rows = document.querySelectorAll('mat-list-item, [role="listitem"], .source-item, .mat-mdc-list-item, li');
+            rows.forEach(row => {
+                const text = norm(row.innerText || row.textContent || '');
+                if (!text) return;
+                if (text.includes(target) || target.includes(text) || hasTokenOverlap(text, target)) {
+                    matches += 1;
+                }
+            });
+            return matches;
+        }""", source_name))
+    except Exception:
+        return 0
 
 
 def dismiss_overlays(page):
@@ -147,7 +233,6 @@ def find_more_button_with_scroll(page, source_name, attempts=10):
     """Try to locate a source's more button while scrolling a virtualized list."""
     panel = find_sources_panel(page)
 
-    # First try without scrolling
     btn = find_more_button_js(page, source_name)
     if btn:
         return btn
@@ -155,7 +240,6 @@ def find_more_button_with_scroll(page, source_name, attempts=10):
     if not panel:
         return None
 
-    # Sweep down
     for _ in range(attempts):
         btn = find_more_button_js(page, source_name)
         if btn:
@@ -166,7 +250,6 @@ def find_more_button_with_scroll(page, source_name, attempts=10):
             break
         page.wait_for_timeout(250)
 
-    # Sweep up and retry
     try:
         panel.evaluate("el => { el.scrollTop = 0; }")
         page.wait_for_timeout(250)
@@ -191,7 +274,6 @@ def click_confirm_delete(page):
     Tries multiple strategies to handle English/Swedish variants."""
     page.wait_for_timeout(600)
 
-    # Strategy 1: role-based with broad regex
     try:
         btn = page.get_by_role(
             "button", name=re.compile(r"Delete|Remove|Ta bort|Radera", re.I)
@@ -202,7 +284,6 @@ def click_confirm_delete(page):
     except Exception:
         pass
 
-    # Strategy 2: find buttons inside the dialog overlay
     try:
         dialog_btns = page.locator(
             ".cdk-overlay-container mat-dialog-actions button, "
@@ -216,7 +297,6 @@ def click_confirm_delete(page):
     except Exception:
         pass
 
-    # Strategy 3: any button with delete-ish text anywhere in the overlay
     try:
         overlay_btn = page.locator(".cdk-overlay-container").get_by_role(
             "button", name=re.compile(r"Delete|Remove|Ta bort|Radera|OK|Confirm", re.I)
@@ -233,11 +313,9 @@ def delete_one_source(page, source_name):
     """Delete a single copy of *source_name* from the notebook. Returns True on success."""
     dismiss_overlays(page)
 
-    # Find the More (three-dots) button for this source
     more_btn = find_more_button_with_scroll(page, source_name)
 
     if not more_btn:
-        # Fallback: locate by visible text/token(s) -> ancestor row -> local button
         queries = [source_name]
         parts = [p for p in re.split(r"[^A-Za-z0-9ÅÄÖåäö]+", source_name) if len(p) >= 4]
         if parts:
@@ -270,7 +348,6 @@ def delete_one_source(page, source_name):
     more_btn.click(timeout=5_000)
     page.wait_for_timeout(600)
 
-    # Click "Remove source" in the context menu
     try:
         remove_item = page.get_by_role(
             "menuitem", name=re.compile(r"Remove|Ta bort", re.I)
@@ -278,7 +355,6 @@ def delete_one_source(page, source_name):
         remove_item.wait_for(state="visible", timeout=3_000)
         remove_item.click(timeout=5_000)
     except Exception:
-        # Fallback: any menu item in the overlay
         try:
             menu_items = page.locator(".cdk-overlay-container .mat-mdc-menu-item, .cdk-overlay-container [mat-menu-item]")
             for i in range(menu_items.count()):
@@ -292,7 +368,6 @@ def delete_one_source(page, source_name):
 
     page.wait_for_timeout(600)
 
-    # Confirm the delete in the dialog
     if not click_confirm_delete(page):
         dismiss_overlays(page)
         return False
@@ -301,18 +376,23 @@ def delete_one_source(page, source_name):
     return True
 
 
-def run_delete(dry_run: bool = False):
-    to_remove = get_sources_to_remove()
-    if not to_remove:
+def _execute_deletion_plan(plan, dry_run: bool = False):
+    if not plan:
         print("--- No sources to remove. ---")
         return
 
-    print(f"--- Removing {len(to_remove)} unique source name(s) from NotebookLM ---")
+    print(f"--- Removing {len(plan)} source name(s) from NotebookLM ---")
 
     if dry_run:
         print("[DRY-RUN] Parsed delete plan only. No browser actions executed.")
-        for name in to_remove:
-            print(f"   [PLAN] {name}")
+        for item in plan:
+            limit = item.get("max_deletions")
+            if item.get("keep_one_copy"):
+                print(f"   [PLAN] {item['name']} (remove duplicate copies, keep one)")
+            elif limit is None:
+                print(f"   [PLAN] {item['name']} (remove all copies)")
+            else:
+                print(f"   [PLAN] {item['name']} (remove {limit} duplicate copies)")
         return
 
     try:
@@ -320,8 +400,9 @@ def run_delete(dry_run: bool = False):
     except Exception as exc:
         print(f"[FAIL] Playwright is required for deletion automation: {exc}")
         return
-    for name in to_remove:
-        print(f"   [QUEUED] {name}")
+
+    for item in plan:
+        print(f"   [QUEUED] {item['name']}")
 
     with sync_playwright() as p:
         try:
@@ -343,9 +424,19 @@ def run_delete(dry_run: bool = False):
         ).first.wait_for(state="visible", timeout=30_000)
 
         total_removed = 0
-        for source_name in to_remove:
+        for item in plan:
+            source_name = item["name"]
+            max_deletions = item.get("max_deletions")
+            keep_one_copy = bool(item.get("keep_one_copy"))
+
+            if keep_one_copy:
+                observed = count_source_occurrences(page, source_name)
+                max_deletions = max(observed - 1, 0)
+                if observed > 0:
+                    print(f"   [INFO] {source_name}: observed {observed} copy/copies, deleting {max_deletions}.")
+
             copies = 0
-            while copies < 10:
+            while copies < (max_deletions if max_deletions is not None else 10):
                 try:
                     if delete_one_source(page, source_name):
                         copies += 1
@@ -354,6 +445,7 @@ def run_delete(dry_run: bool = False):
                 except Exception:
                     dismiss_overlays(page)
                     break
+
             total_removed += copies
             if copies > 0:
                 extra = f" ({copies} copies)" if copies > 1 else ""
@@ -364,5 +456,21 @@ def run_delete(dry_run: bool = False):
         print(f"\n--- Removed {total_removed} source(s) total. ---")
 
 
+def run_delete(dry_run: bool = False):
+    plan = get_sources_to_remove()
+    _execute_deletion_plan(plan, dry_run=dry_run)
+
+
+def run_dedupe_current_sources(dry_run: bool = False):
+    plan = get_duplicate_sources_to_remove()
+    _execute_deletion_plan(plan, dry_run=dry_run)
+
+
 if __name__ == "__main__":
-    run_delete(dry_run="--dry-run" in sys.argv)
+    dry_run = "--dry-run" in sys.argv
+    dedupe_current = "--dedupe-current" in sys.argv
+
+    if dedupe_current:
+        run_dedupe_current_sources(dry_run=dry_run)
+    else:
+        run_delete(dry_run=dry_run)
