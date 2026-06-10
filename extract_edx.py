@@ -1,8 +1,11 @@
-import tarfile
+import argparse
+import json
 import os
 import sys
+import tarfile
 import xml.etree.ElementTree as ET
-import json
+
+from config import EXTRACT_DIR, resolve_tar_path
 
 def extract_and_parse(tar_path, extract_dir):
     if not os.path.exists(tar_path):
@@ -75,4 +78,23 @@ def extract_and_parse(tar_path, extract_dir):
     print("Structure saved to course_structure.json")
 
 if __name__ == "__main__":
-    extract_and_parse("course.qz3jt_37.tar.gz", "edx_export")
+    parser = argparse.ArgumentParser(description="Extract edX course .tar.gz and build course_structure.json")
+    parser.add_argument(
+        "--tar",
+        dest="tar_path",
+        default=None,
+        help="Path to course export .tar.gz (default: EDX_TAR_PATH or newest course*.tar.gz in project)",
+    )
+    parser.add_argument(
+        "--extract-dir",
+        default=EXTRACT_DIR,
+        help=f"Unpack directory (default: {EXTRACT_DIR!r} or EDX_EXTRACT_DIR)",
+    )
+    args = parser.parse_args()
+    try:
+        tar_path = resolve_tar_path(args.tar_path)
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+    print(f"Using archive: {tar_path}")
+    extract_and_parse(tar_path, args.extract_dir)

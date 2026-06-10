@@ -1,5 +1,9 @@
+import argparse
+import sys
 import tarfile
-import os
+
+from config import resolve_tar_path
+
 
 def analyze_tar(file_path):
     print(f"Opening {file_path}...")
@@ -10,5 +14,19 @@ def analyze_tar(file_path):
                 f.write(f"{member.name}\n")
     print("Files listed in tar_contents.txt")
 
+
 if __name__ == "__main__":
-    analyze_tar("course.6gehwzol.tar.gz")
+    parser = argparse.ArgumentParser(description="List contents of edX course .tar.gz")
+    parser.add_argument(
+        "--tar",
+        dest="tar_path",
+        default=None,
+        help="Path to .tar.gz (default: EDX_TAR_PATH or newest course*.tar.gz in project)",
+    )
+    args = parser.parse_args()
+    try:
+        path = resolve_tar_path(args.tar_path)
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+    analyze_tar(path)
