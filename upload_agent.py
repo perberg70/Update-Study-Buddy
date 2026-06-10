@@ -8,19 +8,21 @@ into that file). That is **one** file-upload source per chapter for body text. R
 import json
 import os
 import re
+import shutil
 import sys
 import time
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
-from config import CDP_URL, PROJECT_URL
+from config import CDP_URL, PROJECT_URL, chapter_dir_slug, notebook_source_display_name, safe_upload_filename
 from notebook_ready import ADD_SOURCE_BTN, pick_notebook_page, resolve_sidebar_frame
 from notebooklm_sources import manifest_path_is_per_url_split
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 MANIFEST_PATH = SCRIPT_DIR / "processing_manifest.json"
 REVIEW_PATH = SCRIPT_DIR / "comparison_review.json"
+UPLOAD_STAGING_DIR = SCRIPT_DIR / ".upload_staging"
 MAX_UPLOAD_SIZE_MB = 50
 
 # Add-sources sheet (may live in main frame or a child frame; not always same as sidebar frame)
@@ -93,35 +95,80 @@ def _click_button_name_any_frame(page, pattern: re.Pattern[str], *, timeout_ms: 
 
 
 def _fill_website_or_paste_dialog(page, content: str, display_title: str, *, use_websites: bool) -> None:
-    """Add-sources sheet: Websites / paste URL vs Copied text."""
+    """Add-sources sheet: Websites / paste URL vs Copied text (more resilient to UI variants)."""
+    def _force_fill_title(frame) -> bool:
+        try:
+            return bool(
+                frame.evaluate(
+                    r"""(title) => {
+          const fields = Array.from(document.querySelectorAll(
+            "input:not([type='url']), textarea"
+          ));
+          for (const el of fields) {
+            const ph = (el.getAttribute('placeholder') || '').toLowerCase();
+            const al = (el.getAttribute('aria-label') || '').toLowerCase();
+            if (/title|namn|name/.test(ph) || /title|namn|name/.test(al)) {
+              el.value = title;
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+              return true;
+            }
+          }
+          return false;
+        }""",
+                    display_title,
+                )
+            )
+        except Exception:
+            return False
+
     if use_websites:
         _click_button_name_any_frame(page, WEBSITES_LINK_BTN)
     else:
         _click_button_name_any_frame(page, re.compile(r"Copied\s+text|Kopierad\s+text", re.I))
 
-    deadline = time.monotonic() + 20.0
+    deadline = time.monotonic() + 25.0
     last_exc = None
     while time.monotonic() < deadline:
         for fr in page.frames:
             try:
-                ta = fr.locator(
-                    "textarea[placeholder*='Klistra in'], textarea[placeholder*='Paste'], textarea"
+                # NotebookLM sometimes uses textarea, sometimes input[type=url].
+                url_field = fr.locator(
+                    "textarea[placeholder*='Klistra in'], textarea[placeholder*='Paste'], "
+                    "input[type='url'], input[placeholder*='http'], input[aria-label*='URL']"
                 ).first
-                if ta.is_visible(timeout=600):
-                    ta.fill(content)
-                    inp = fr.locator("input[placeholder*='Namn'], input[placeholder*='Title']").first
-                    if inp.is_visible(timeout=1500):
-                        inp.fill(display_title)
-                    fr.get_by_role("button", name=re.compile(r"Infoga|Insert|Spara|Save", re.I)).first.click(
-                        timeout=10_000
-                    )
-                    return
+                if not url_field.is_visible(timeout=800):
+                    continue
+                url_field.fill(content)
+
+                title_field = fr.locator(
+                    "input[placeholder*='Namn'], input[placeholder*='Title'], "
+                    "input[aria-label*='Namn'], input[aria-label*='Title']"
+                ).first
+                try:
+                    if title_field.is_visible(timeout=1200):
+                        title_field.fill(display_title)
+                    else:
+                        _force_fill_title(fr)
+                except Exception:
+                    _force_fill_title(fr)
+
+                btn = fr.get_by_role("button", name=re.compile(r"Infoga|Insert|Spara|Save|Done", re.I)).first
+                # Wait for button to become enabled (URL validation can be slow).
+                try:
+                    fr.wait_for_timeout(300)
+                    if btn.is_disabled():
+                        fr.wait_for_timeout(700)
+                except Exception:
+                    pass
+                btn.click(timeout=8_000)
+                return
             except Exception as e:
                 last_exc = e
-        page.wait_for_timeout(200)
+        page.wait_for_timeout(250)
     if last_exc:
         raise last_exc
-    raise TimeoutError("Could not fill add-source dialog (textarea/title/confirm)")
+    raise TimeoutError("Could not fill add-source dialog (URL/title/confirm)")
 
 
 def _click_upload_files_any_frame(page, timeout_ms: int = 15_000) -> None:
@@ -186,6 +233,35 @@ def resolve_project_path(p):
     return str(SCRIPT_DIR / path)
 
 
+def _clear_upload_staging() -> None:
+    if UPLOAD_STAGING_DIR.is_dir():
+        shutil.rmtree(UPLOAD_STAGING_DIR, ignore_errors=True)
+
+
+def _stage_file_for_upload(source_path: str, display_name: str) -> str:
+    """Copy ``source_path`` to staging with ``display_name`` so NotebookLM shows the prefixed title."""
+    src = Path(source_path)
+    ext = src.suffix or ""
+    staged_name = safe_upload_filename(display_name, fallback_ext=ext)
+    if src.name == staged_name:
+        return str(src)
+    UPLOAD_STAGING_DIR.mkdir(parents=True, exist_ok=True)
+    dest = UPLOAD_STAGING_DIR / staged_name
+    if dest.exists():
+        dest.unlink()
+    shutil.copy2(src, dest)
+    return str(dest)
+
+
+def display_name_for_upload_row(row: dict) -> str:
+    """NotebookLM source title for a manifest/review row."""
+    return notebook_source_display_name(
+        row.get("chapter", ""),
+        row.get("name", ""),
+        file_path=row.get("path", ""),
+    )
+
+
 def get_upload_plan():
     """If comparison_review.json exists, return only files marked for upload (REPLACE / ADD).
     Returns None when no review file is found (caller falls back to full manifest)."""
@@ -224,12 +300,65 @@ def get_upload_plan():
     return files
 
 
-def run_upload(*, include_url_splits: bool = True):
-    # Build upload list --------------------------------------------------------
-    upload_plan = get_upload_plan()
+def load_manifest_items(
+    *,
+    chapter: str | int | None = None,
+    include_url_splits: bool = True,
+    types: set[str] | None = None,
+) -> list[dict]:
+    """Load upload rows from ``processing_manifest.json``, optionally filtered by chapter."""
+    if not MANIFEST_PATH.exists():
+        raise FileNotFoundError(f"{MANIFEST_PATH.name} not found. Run organize_content.py first.")
+    with open(MANIFEST_PATH, encoding="utf-8") as f:
+        manifest = json.load(f)
 
-    if upload_plan is not None:
-        upload_items = upload_plan
+    chapter_key = str(chapter).strip() if chapter is not None else ""
+
+    def matches(ch: dict) -> bool:
+        if not chapter_key:
+            return True
+        title = ch.get("chapter", "")
+
+        track = re.match(r"^(\d+)([A-Za-z])$", chapter_key)
+        if track:
+            num, letter = track.group(1), track.group(2).upper()
+            return bool(re.match(rf"^{num}\.{letter}\s*Track:", title, re.I))
+
+        if chapter_key.isdigit():
+            num = int(chapter_key)
+            return bool(re.match(rf"^{num}\.\s", title))
+
+        folder_hint = chapter_key.replace(" ", "_").lower()
+        for row in ch.get("files", []) or []:
+            path = str(row.get("path", "")).replace("\\", "/").lower()
+            if folder_hint in path.split("/"):
+                return True
+        return folder_hint in title.replace(" ", "_").lower()
+
+    items: list[dict] = []
+    for ch in manifest:
+        if chapter_key and not matches(ch):
+            continue
+        for f in ch.get("files", []):
+            pth = f.get("path", "")
+            if not include_url_splits and manifest_path_is_per_url_split(pth):
+                continue
+            ftype = (f.get("type") or "").lower()
+            if types is not None and ftype not in types:
+                continue
+            items.append({
+                "name": f["name"],
+                "path": pth,
+                "type": f.get("type", ""),
+                "chapter": ch["chapter"],
+            })
+    return items
+
+
+def run_upload(*, include_url_splits: bool = True, upload_items: list[dict] | None = None):
+    # Build upload list --------------------------------------------------------
+    if upload_items is not None:
+        upload_items = list(upload_items)
         if not include_url_splits:
             before = len(upload_items)
             upload_items = [
@@ -237,30 +366,31 @@ def run_upload(*, include_url_splits: bool = True):
             ]
             dropped = before - len(upload_items)
             if dropped:
-                print(
-                    f"[INFO] Dropped {dropped} per-URL split file(s) from review "
-                    f"(url_sources/ / toolbox_sources/). Omit --exclude-url-split-sources to upload them (default)."
-                )
-        print(f"--- Starting NoteBookLM upload ({len(upload_items)} file(s) from comparison review) ---")
+                print(f"[INFO] Dropped {dropped} url_sources/ row(s) from this upload batch.")
+        print(f"--- Starting NotebookLM upload ({len(upload_items)} file(s)) ---")
     else:
-        if not MANIFEST_PATH.exists():
-            print(f"Error: {MANIFEST_PATH} not found. Run organize_content.py first.")
-            return
-        with open(MANIFEST_PATH, encoding="utf-8") as f:
-            manifest = json.load(f)
-        upload_items = []
-        for ch in manifest:
-            for f in ch.get("files", []):
-                pth = f.get("path", "")
-                if not include_url_splits and manifest_path_is_per_url_split(pth):
-                    continue
-                upload_items.append({
-                    "name": f["name"],
-                    "path": pth,
-                    "type": f.get("type", ""),
-                    "chapter": ch["chapter"],
-                })
-        print(f"--- Starting NoteBookLM upload (all {len(upload_items)} file(s) from manifest) ---")
+        upload_plan = get_upload_plan()
+
+        if upload_plan is not None:
+            upload_items = upload_plan
+            if not include_url_splits:
+                before = len(upload_items)
+                upload_items = [
+                    x for x in upload_items if not manifest_path_is_per_url_split(x.get("path", ""))
+                ]
+                dropped = before - len(upload_items)
+                if dropped:
+                    print(
+                        f"[INFO] Dropped {dropped} per-URL split file(s) from review "
+                        f"(url_sources/ / toolbox_sources/). Omit --exclude-url-split-sources to upload them (default)."
+                    )
+            print(f"--- Starting NoteBookLM upload ({len(upload_items)} file(s) from comparison review) ---")
+        else:
+            if not MANIFEST_PATH.exists():
+                print(f"Error: {MANIFEST_PATH} not found. Run organize_content.py first.")
+                return
+            upload_items = load_manifest_items(include_url_splits=include_url_splits)
+            print(f"--- Starting NoteBookLM upload (all {len(upload_items)} file(s) from manifest) ---")
 
     if not upload_items:
         print("--- Nothing to upload. ---")
@@ -344,109 +474,112 @@ def run_upload(*, include_url_splits: bool = True):
         # Upload loop ----------------------------------------------------------
         current_chapter = None
         upload_failures = 0
-        for file_info in upload_items:
-            ch = file_info.get("chapter", "")
-            if ch and ch != current_chapter:
-                current_chapter = ch
-                print(f"\n[FOLDER] Chapter: {current_chapter}")
+        _clear_upload_staging()
+        try:
+            for file_info in upload_items:
+                ch = file_info.get("chapter", "")
+                if ch and ch != current_chapter:
+                    current_chapter = ch
+                    print(f"\n[FOLDER] Chapter: {current_chapter}")
 
-            file_name = file_info["name"]
-            file_path = resolve_project_path(file_info["path"])
-            file_type = file_info["type"]
+                file_name = file_info["name"]
+                file_path = resolve_project_path(file_info["path"])
+                file_type = file_info["type"]
+                display_title = display_name_for_upload_row(file_info)
 
-            print(f"   [WAIT] Uploading {file_name} ({file_type})...")
+                print(f"   [WAIT] Uploading {display_title} ({file_type})...")
 
-            try:
-                if not skip_next_add:
-                    add_sources_btn = sidebar.get_by_role("button", name=ADD_SOURCE_BTN).first
-                    add_sources_btn.wait_for(state="visible", timeout=25_000)
-                    add_sources_btn.click(timeout=15_000)
-                    page.wait_for_timeout(800)
-                else:
-                    skip_next_add = False
-                    page.wait_for_timeout(400)
+                try:
+                    if not skip_next_add:
+                        add_sources_btn = sidebar.get_by_role("button", name=ADD_SOURCE_BTN).first
+                        add_sources_btn.wait_for(state="visible", timeout=25_000)
+                        add_sources_btn.click(timeout=15_000)
+                        page.wait_for_timeout(800)
+                    else:
+                        skip_next_add = False
+                        page.wait_for_timeout(400)
 
-                UPLOAD_FILE_EXTS = {".txt", ".pdf", ".md", ".docx", ".xlsx", ".mp3", ".wav", ".m4a"}
-                ext = _effective_upload_ext(file_name, file_path)
-                raw_manifest_path = file_info.get("path") or ""
+                    UPLOAD_FILE_EXTS = {".txt", ".pdf", ".md", ".docx", ".xlsx", ".mp3", ".wav", ".m4a"}
+                    ext = _effective_upload_ext(file_name, file_path)
+                    raw_manifest_path = file_info.get("path") or ""
 
-                # Link / website rows: never upload url_sources/*.txt via file picker as "documents".
-                # Manifest often sets ``name`` to the URL and ``type`` to ``url`` — do not use Copied text.
-                is_link_row = (file_type or "").lower() == "url" or manifest_path_is_per_url_split(
-                    raw_manifest_path
-                )
-                link_url = ""
-                if is_link_row:
-                    link_url = _source_url_from_extracted_txt(file_path)
-                    if not link_url and isinstance(file_name, str) and file_name.strip().startswith(
-                        ("http://", "https://")
-                    ):
-                        link_url = file_name.strip()
-
-                if link_url:
-                    display_title = link_url
-                    _fill_website_or_paste_dialog(page, link_url, display_title, use_websites=True)
-                elif is_link_row:
-                    print(
-                        f"   [FAIL] Link source but could not resolve URL "
-                        f"(check Source URL: line in file): {file_path}"
+                    is_link_row = (file_type or "").lower() == "url" or manifest_path_is_per_url_split(
+                        raw_manifest_path
                     )
-                    upload_failures += 1
-                    continue
-                elif file_type in ("text", "audio") or (
-                    os.path.exists(file_path) and ext in UPLOAD_FILE_EXTS
-                ):
-                    if not os.path.exists(file_path):
-                        print(f"   [FAIL] File not found: {file_path}")
+                    link_url = ""
+                    if is_link_row:
+                        link_url = _source_url_from_extracted_txt(file_path)
+                        if not link_url and isinstance(file_name, str) and file_name.strip().startswith(
+                            ("http://", "https://")
+                        ):
+                            link_url = file_name.strip()
+
+                    if link_url:
+                        _fill_website_or_paste_dialog(page, link_url, display_title, use_websites=True)
+                    elif is_link_row:
+                        print(
+                            f"   [FAIL] Link source but could not resolve URL "
+                            f"(check Source URL: line in file): {file_path}"
+                        )
                         upload_failures += 1
                         continue
-                    size_mb = os.path.getsize(file_path) / (1024 * 1024)
-                    if size_mb > MAX_UPLOAD_SIZE_MB:
-                        print(
-                            f"   [SKIP] {file_name} ({size_mb:.1f} MB) exceeds "
-                            f"{MAX_UPLOAD_SIZE_MB} MB CDP limit — upload manually in NotebookLM."
-                        )
+                    elif file_type in ("text", "audio") or (
+                        os.path.exists(file_path) and ext in UPLOAD_FILE_EXTS
+                    ):
+                        if not os.path.exists(file_path):
+                            print(f"   [FAIL] File not found: {file_path}")
+                            upload_failures += 1
+                            continue
+                        size_mb = os.path.getsize(file_path) / (1024 * 1024)
+                        if size_mb > MAX_UPLOAD_SIZE_MB:
+                            print(
+                                f"   [SKIP] {file_name} ({size_mb:.1f} MB) exceeds "
+                                f"{MAX_UPLOAD_SIZE_MB} MB CDP limit — upload manually in NotebookLM."
+                            )
+                            page.keyboard.press("Escape")
+                            page.wait_for_timeout(300)
+                            page.keyboard.press("Escape")
+                            continue
+                        with page.expect_file_chooser() as fc_info:
+                            _click_upload_files_any_frame(page, timeout_ms=15_000)
+                        file_chooser = fc_info.value
+                        upload_path = _stage_file_for_upload(file_path, display_title)
+                        file_chooser.set_files(upload_path)
+                    else:
+                        raw_path = file_info["path"]
+                        if raw_path.startswith(("http://", "https://")):
+                            content = raw_path
+                            _fill_website_or_paste_dialog(
+                                page,
+                                content,
+                                display_title,
+                                use_websites=True,
+                            )
+                        else:
+                            with open(file_path, "r", encoding="utf-8") as tf:
+                                content = tf.read()
+                            _fill_website_or_paste_dialog(
+                                page,
+                                content,
+                                display_title,
+                                use_websites=False,
+                            )
+
+                    page.wait_for_timeout(3000)
+                    print(f"   [OK] {display_title} uploaded.")
+
+                except Exception as e:
+                    print(f"   [FAIL] Failed to upload {display_title}: {e}")
+                    upload_failures += 1
+                    try:
                         page.keyboard.press("Escape")
                         page.wait_for_timeout(300)
                         page.keyboard.press("Escape")
-                        continue
-                    with page.expect_file_chooser() as fc_info:
-                        _click_upload_files_any_frame(page, timeout_ms=15_000)
-                    file_chooser = fc_info.value
-                    file_chooser.set_files(file_path)
-                else:
-                    raw_path = file_info["path"]
-                    if raw_path.startswith(("http://", "https://")):
-                        content = raw_path
-                        _fill_website_or_paste_dialog(
-                            page,
-                            content,
-                            content,
-                            use_websites=True,
-                        )
-                    else:
-                        with open(file_path, "r", encoding="utf-8") as tf:
-                            content = tf.read()
-                        _fill_website_or_paste_dialog(
-                            page,
-                            content,
-                            file_name.replace(".txt", ""),
-                            use_websites=False,
-                        )
-
-                page.wait_for_timeout(3000)
-                print(f"   [OK] {file_name} uploaded.")
-
-            except Exception as e:
-                print(f"   [FAIL] Failed to upload {file_name}: {e}")
-                upload_failures += 1
-                try:
-                    page.keyboard.press("Escape")
-                    page.wait_for_timeout(300)
-                    page.keyboard.press("Escape")
-                    page.wait_for_timeout(200)
-                except Exception:
-                    pass
+                        page.wait_for_timeout(200)
+                    except Exception:
+                        pass
+        finally:
+            _clear_upload_staging()
 
         print("\n--- Autonomous upload process finished. ---")
         if upload_failures:
