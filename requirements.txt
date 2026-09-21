@@ -14,3 +14,9 @@ youtube-transcript-api>=1.0
 # and local: audio never leaves the machine, which AGENTS.md requires. Several
 # times quicker on CPU than openai-whisper, which works too if preferred.
 faster-whisper>=1.0
+
+# Text out of the PDFs the course carries in static/, for the module PDFs
+# (tools/asset_text.py). Optional and pure Python: without it those documents
+# are labelled in the module PDF with a line saying the reader is missing.
+# pdfminer.six is used instead if it is the one already installed.
+pypdf>=4.0

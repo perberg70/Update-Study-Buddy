@@ -33,14 +33,16 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      # reportlab only: it is what the PDF tests exercise, and it installs in
-      # seconds. playwright would pull a browser, and faster-whisper pulls
-      # ctranslate2 and a model runtime - neither is reachable from the tests,
-      # which stub the browser and skip transcription when no backend is there.
+      # Two pure-Python packages, installing in seconds: reportlab writes the
+      # module PDFs, pypdf reads the course documents out of static/. Both are
+      # exercised by the suite. playwright would pull a browser, and
+      # faster-whisper pulls ctranslate2 and a model runtime - neither is
+      # reachable from the tests, which stub the browser and skip transcription
+      # when no backend is there.
       - name: Install the packages the tests exercise
         run: |
           python -m pip install --upgrade pip
-          pip install reportlab
+          pip install reportlab pypdf
 
       - name: Every module imports and compiles
         run: python -m compileall -q . -x '(^|/)(\.git|__pycache__|course_exports)(/|$)'

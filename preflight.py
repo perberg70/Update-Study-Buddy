@@ -11,7 +11,8 @@ import socket
 import subprocess
 import sys
 
-from config import CDP_URL, looks_like_import_archive, resolve_tar_path
+from config import (CDP_URL, PROJECT_DIR, looks_like_import_archive,
+                    resolve_tar_path)
 
 # olx_archive is imported inside check_tarball, not here. On a checkout that
 # predates it - main, say - a module-scope import raises ModuleNotFoundError
@@ -127,6 +128,23 @@ def check_optional_deps() -> bool:
     for package, enables in missing:
         print(f"[WARN] {package} missing - {enables}")
         print(f"       pip install {package}")
+
+    # The PDF reader is asked separately, and not with __import__: either of two
+    # packages satisfies it, and `import pypdf` succeeds even where
+    # `from pypdf import PdfReader` dies inside a broken cryptography. Probing
+    # the entry point is the only check that means anything here.
+    try:
+        sys.path.insert(0, os.path.join(PROJECT_DIR, "tools"))
+        from asset_text import pdf_backend
+        reader = pdf_backend()[0]
+    except Exception:
+        reader = ""
+    where = "course documents in static/ (tools/build_module_pdf.py)"
+    if reader:
+        print(f"[OK] {reader} available - {where}")
+    else:
+        print(f"[WARN] no PDF reader - {where}")
+        print("       pip install pypdf")
     return True
 
 

@@ -33,6 +33,7 @@ from config import (COURSE_STRUCTURE_PATH,  # noqa: E402
                     ORGANIZED_CONTENT_DIR, TRANSCRIPTS_DIR)
 from olx_archive import (CourseArchiveError, describe_source,  # noqa: E402
                          open_for_structure)
+from asset_text import asset_text, linked_documents, static_lookup  # noqa: E402
 
 MODULE_NUMBER_RE = re.compile(r"^\s*(\d+)")
 NO_TRANSCRIPT = "[no transcript in export]"
@@ -587,7 +588,8 @@ def build_styles(fonts=None):
 
 
 def module_story(module, archive, styles, stats, unicode_ok=True,
-                 transcripts_dir=None, include_hidden=False):
+                 transcripts_dir=None, include_hidden=False,
+                 include_documents=True):
     """Flowables for one module, in course order."""
     from reportlab.platypus import Paragraph, Spacer
     from reportlab.lib.units import mm
@@ -595,8 +597,28 @@ def module_story(module, archive, styles, stats, unicode_ok=True,
     def para(text, style, bullet=None):
         return Paragraph(xml_escape(safe_text(text, unicode_ok)), style, bulletText=bullet)
 
+    # Seeded here rather than trusted from the caller: this function decides
+    # what it counts, and a caller whose dict predates a counter would other-
+    # wise fail with a KeyError partway through a build that was going fine.
+    for key in ("units", "subunits", "html", "videos", "transcripts", "from_olx",
+                "from_store", "video_missing", "stale_transcripts",
+                "hidden_text_components", "hidden_chars", "documents",
+                "document_words"):
+        stats.setdefault(key, 0)
+    stats.setdefault("skipped", {})
+    for key in ("hidden_nodes", "documents_unread"):
+        stats.setdefault(key, [])
+
     story = [para(module_label(module), styles["title"])]
     multi = len(module["chapters"]) > 1
+
+    # Documents the course carries in static/ and links from its HTML. Resolved
+    # once: the lookup is over every file in the archive. Emitted under the
+    # component that links them, which is the only place the course itself says
+    # they belong - and only once per module, since a handbook is commonly
+    # linked from several units.
+    lookup = static_lookup(archive) if include_documents else {}
+    seen_documents = set()
 
     def skip(node, kind):
         """Record a node students cannot see, and say so rather than dropping it."""
@@ -640,6 +662,24 @@ def module_story(module, archive, styles, stats, unicode_ok=True,
                                 story.append(para(text, styles["item"], bullet="•"))
                             else:
                                 story.append(para(text, styles["body"]))
+
+                        if include_documents:
+                            body = archive.read_text(relpath) or ""
+                            for name in linked_documents(body, lookup):
+                                if name in seen_documents:
+                                    continue
+                                seen_documents.add(name)
+                                text, how = asset_text(archive, name)
+                                story.append(para(f"Document: {name}",
+                                                  styles["inner"]))
+                                if text:
+                                    stats["documents"] += 1
+                                    stats["document_words"] += len(text.split())
+                                    story.append(para(text, styles["body"]))
+                                else:
+                                    stats["documents_unread"].append((name, how))
+                                    story.append(para(f"[not included: {how}]",
+                                                      styles["video"]))
 
                     elif ctype == "video":
                         title, text = video_entry(url_name, vert.get("title", ""),
@@ -692,6 +732,9 @@ def main() -> int:
     parser.add_argument("--allow-stale", action="store_true",
                         help="build even when course_structure.json and the archive "
                              "disagree about which export they came from")
+    parser.add_argument("--no-documents", action="store_true",
+                        help="leave out the text of course documents linked "
+                             "from static/ (included by default)")
     parser.add_argument("--include-hidden", action="store_true",
                         help="also include staff-only units and text hidden from "
                              "sighted users (both are skipped by default)")
@@ -750,10 +793,12 @@ def main() -> int:
     stats = {"units": 0, "subunits": 0, "html": 0, "videos": 0, "transcripts": 0,
              "from_olx": 0, "from_store": 0, "video_missing": 0, "skipped": {},
              "hidden_nodes": [], "hidden_text_components": 0, "hidden_chars": 0,
-             "stale_transcripts": 0}
+             "stale_transcripts": 0, "documents": 0, "document_words": 0,
+             "documents_unread": []}
     story = module_story(module, archive, styles, stats, unicode_ok=bool(fonts),
                          transcripts_dir=args.transcripts_dir,
-                         include_hidden=args.include_hidden)
+                         include_hidden=args.include_hidden,
+                         include_documents=not args.no_documents)
 
     os.makedirs(args.out_dir, exist_ok=True)
     out_path = os.path.join(args.out_dir, module_filename(module))
@@ -782,6 +827,11 @@ def main() -> int:
             print("     [WARN] No transcripts found. Drop them into "
                   f"{args.transcripts_dir}/ named")
             print("            <video url_name>.vtt (or .txt/.srt) and re-run.")
+    if stats["documents"] or stats["documents_unread"]:
+        print(f"     documents: {stats['documents']} included "
+              f"({stats['document_words']} words)")
+        for name, how in stats["documents_unread"]:
+            print(f"       [not read] {name[:46]}: {how[:60]}")
     if stats["skipped"]:
         detail = ", ".join(f"{n} {t}" for t, n in sorted(stats["skipped"].items()))
         print(f"     not included: {detail}")

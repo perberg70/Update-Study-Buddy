@@ -36,56 +36,30 @@ from config import COURSE_STRUCTURE_PATH  # noqa: E402
 from olx_archive import (CourseArchiveError, describe_source,  # noqa: E402
                          open_course_archive)
 from build_module_pdf import group_modules, module_label  # noqa: E402
+from asset_text import (STATIC_REF_RE, build_lookup,  # noqa: E402
+                        pdf_backend, url_name)
 
-# /static/name.ext as OLX writes it in href/src, ignoring any ?query or #frag.
-STATIC_REF_RE = re.compile(r"/static/([^\"'\s>?#\\]+)")
-
-# Transcript sidecars are already handled by the transcript resolver; counting
-# them here would bury the documents this is looking for.
+# Transcript sidecars are already handled by the transcript resolver;
+# counting them here would bury the documents this is looking for.
 TRANSCRIPT_SUFFIXES = (".srt", ".sjson", ".vtt")
 
-TEXT_READY = {".txt": "stdlib", ".md": "stdlib", ".html": "stdlib",
-              ".docx": "stdlib (zip + xml)", ".pdf": "needs pdfminer.six",
-              ".xlsx": "stdlib (zip + xml), but a sheet reads poorly as prose"}
+TEXT_READY = {".txt": "stdlib", ".md": "stdlib", ".csv": "stdlib",
+              ".docx": "stdlib (zip + xml)", ".pdf": "needs pypdf or pdfminer.six",
+              ".xlsx": "stdlib (zip + xml), cell text only"}
 
 # Audio uploaded as course material - an AI summary of a section, say. Speech,
 # so the existing local Whisper path applies rather than a document reader.
 AUDIO_SUFFIXES = (".m4a", ".mp3", ".wav", ".ogg", ".aac", ".flac")
 
-
-# edX keeps the uploaded filename but makes its static URL safe, replacing
-# every character outside this set with an underscore. Derived from the real
-# course: "Intro Learning with AI (Mod 2).png" is linked as
-# "Intro_Learning_with_AI__Mod_2_.png", and "students' learning" as
-# "students__learning" - so brackets and apostrophes go the same way as spaces,
-# while dot, dash and underscore survive.
-URL_UNSAFE_RE = re.compile(r"[^A-Za-z0-9._-]")
-
-
-def url_name(stored_name):
-    """The /static/ spelling of a stored filename."""
-    return URL_UNSAFE_RE.sub("_", stored_name)
-
-
-def build_lookup(present):
-    """{url spelling: stored name}, plus any pair that collides."""
-    lookup, collisions = {}, {}
-    for stored in present:
-        key = url_name(stored)
-        if key in lookup and lookup[key] != stored:
-            collisions.setdefault(key, [lookup[key]]).append(stored)
-        lookup[key] = stored
-    return lookup, collisions
-
-
 def pdf_reader_available():
-    for module in ("pdfminer", "pypdf"):
-        try:
-            __import__(module)
-            return module
-        except Exception:
-            continue
-    return ""
+    """Name of a PDF reader that actually works, or ''.
+
+    Imports the entry point, not the package: `import pypdf` succeeds even
+    where `from pypdf import PdfReader` dies inside cryptography, so a shallow
+    check reports a reader that cannot read. This environment does exactly
+    that, which is how the bug was found.
+    """
+    return pdf_backend()[0]
 
 
 IMG_RE = re.compile(r"<img\b[^>]*>", re.I)
