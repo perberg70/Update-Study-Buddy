@@ -23,6 +23,16 @@ STOP_WORDS = {"and", "the", "of", "in", "to", "a", "is", "for", "with", "on", "b
 MATCH_THRESHOLD = 0.35
 HIGH_CONFIDENCE = 0.75
 
+# Sources uploaded by an earlier workflow carry the chapter title as a prefix:
+#   "2 Learning with AI - Learning_Mode_Short_Demo.mp3"
+# while organize_content.py generates just "Learning_Mode_Short_Demo.mp3". The
+# blended score dilutes that to ~0.6, because the prefix contributes words the
+# generated name cannot have - measured on the real notebook, 0 of 28 files
+# cleared HIGH_CONFIDENCE despite 23 matching correctly. Recognising the
+# structure directly is more precise than trying to tune the blend around it.
+SUFFIX_MATCH_SCORE = 0.9
+MIN_SUFFIX_WORDS = 3
+
 
 def load_current_sources():
     if not os.path.exists(CURRENT_SOURCES_FILE):
@@ -65,6 +75,21 @@ def normalize(s):
 def significant_words(text):
     words = set(re.findall(r"[a-z0-9]+", text.lower()))
     return words - STOP_WORDS
+
+
+def is_title_suffix(new_name, old_name):
+    """True when *old_name* is *new_name* carrying a prefix.
+
+    Requires at least MIN_SUFFIX_WORDS significant words so a short generic
+    name ("Video.mp3") cannot suffix-match many unrelated titles, and requires
+    a word boundary so "demo.mp3" does not match "...short_demo.mp3".
+    """
+    na, nb = normalize(new_name), normalize(old_name)
+    if not na or not nb or na == nb:
+        return False
+    if len(significant_words(na)) < MIN_SUFFIX_WORDS:
+        return False
+    return nb.endswith(" " + na)
 
 
 def name_similarity(a, b):
@@ -120,6 +145,18 @@ def compute_match_score(new_file, old_name):
     # signals independent triggers rather than one judgement: raw character
     # similarity alone could pair names with no words in common.
     score = sim * 0.5 + w_overlap * 0.3 + ch_overlap * 0.05 + content_boost
+
+    # Unlike the removed max(weighted, sim), this is not a general similarity
+    # escape hatch: it fires only when the existing title is exactly this
+    # filename plus a prefix.
+    if is_title_suffix(new_name, old_name):
+        # Keep the chapter signal on top rather than flattening to a constant:
+        # the same video can appear in two chapters ("3A Track ..." and
+        # "3B Track Academia"), and both suffix-match. Without this the scores
+        # tie and the pairing is decided by manifest order rather than by which
+        # chapter the file actually came from.
+        score = max(score, SUFFIX_MATCH_SCORE + ch_overlap * 0.05)
+
     return round(min(score, 1.0), 3)
 
 
@@ -127,6 +164,8 @@ def match_reason(new_name, old_name, score):
     na, nb = normalize(new_name), normalize(old_name)
     if na == nb:
         return "exact name match"
+    if is_title_suffix(new_name, old_name):
+        return "filename matches title suffix (chapter prefix)"
     if na in nb or nb in na:
         return "name containment"
     if score >= 0.6:
