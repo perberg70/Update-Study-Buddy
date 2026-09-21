@@ -53,6 +53,13 @@ def get_sources_to_remove():
     delete_pairs = 0
     delete_current_only = 0
 
+    # A REPLACE whose new file carries the same title as the source it replaces
+    # is the dangerous case. compare_sources.apply_review uploads before
+    # deleting, so by the time this runs the panel holds two rows with that
+    # title - the stale one and its replacement - and deleting "every match"
+    # removes both. Cap those at observed-1 so exactly one always survives.
+    same_title = []
+
     for pair in review.get("pairs", []):
         action = normalize_action(pair.get("action", ""))
         old_name = _get_name(pair)
@@ -61,6 +68,10 @@ def get_sources_to_remove():
             if old_name and old_name not in seen:
                 seen.add(old_name)
                 names.append(old_name)
+                if (action == "REPLACE"
+                        and _canonical_name(pair.get("new_name", ""))
+                        == _canonical_name(old_name)):
+                    same_title.append(old_name)
 
     for item in review.get("current_only", []):
         action = normalize_action(item.get("action", ""))
@@ -74,7 +85,22 @@ def get_sources_to_remove():
     print(
         f"[PLAN] Review delete actions: pairs={delete_pairs}, current_only={delete_current_only}, unique_sources={len(names)}"
     )
-    return [{"name": n, "max_deletions": None} for n in names]
+
+    if same_title:
+        print(f"[PLAN] {len(same_title)} REPLACE pair(s) upload under the same title as")
+        print("       the source they replace, so one copy is kept rather than")
+        print("       deleting every match:")
+        for name in same_title[:5]:
+            print(f"         {name[:64]}")
+        if len(same_title) > 5:
+            print(f"         ... and {len(same_title) - 5} more")
+        print("       Which copy survives cannot be told apart by title - re-run the")
+        print("       update if the notebook still shows the old content.")
+
+    protected = set(same_title)
+    return [{"name": n, "keep_one_copy": True} if n in protected
+            else {"name": n, "max_deletions": None}
+            for n in names]
 
 
 def get_duplicate_sources_to_remove():

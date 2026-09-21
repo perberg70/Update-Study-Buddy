@@ -76,13 +76,13 @@ def main():
         source = data.get("_source") or {}
         if os.path.basename(source.get("tar", "")) != "course.NEW.tar.gz":
             failures.append(f"provenance should name the archive, got {source.get('tar')!r}")
-        for field in ("sha256_head", "size_bytes", "read_at", "tar_modified",
+        for field in ("sha256", "size_bytes", "read_at", "tar_modified",
                       "files_in_archive", "course_root"):
             if not source.get(field):
                 failures.append(f"provenance missing {field}")
 
-        if (CourseArchive(old).fingerprint()["sha256_head"]
-                == archive.fingerprint()["sha256_head"]):
+        if (CourseArchive(old).fingerprint()["sha256"]
+                == archive.fingerprint()["sha256"]):
             failures.append("distinct archives produced the same fingerprint")
 
         # The recorded archive is what later steps open, not the newest file.

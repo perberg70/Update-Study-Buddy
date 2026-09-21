@@ -168,7 +168,7 @@ def check_tarball() -> bool:
 
     fingerprint = archive.fingerprint()
     print(f"[OK] edX export readable: {path}")
-    print(f"     sha:{fingerprint['sha256_head']}, course root: "
+    print(f"     sha:{fingerprint['sha256']}, course root: "
           f"{fingerprint['course_root']}, {fingerprint['files_in_archive']} file(s)")
 
     reason = looks_like_import_archive(path)

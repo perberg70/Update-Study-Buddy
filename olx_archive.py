@@ -154,13 +154,26 @@ class CourseArchive:
     # -- provenance ------------------------------------------------------
 
     def fingerprint(self) -> dict:
+        """Identity of this archive, for open_for_structure to compare.
+
+        The whole file is hashed. It used to be the first 8 MiB truncated to
+        12 hex characters, which is not an identity: a course archive is
+        hundreds of MB, its early tar members are the structure files that
+        change least between exports, and open_for_structure treats equality
+        of this value as proof that structure and content came from the same
+        export. Two exports differing only in later HTML, transcripts or media
+        would have passed that check.
+
+        Reading a few hundred MB costs about a second, once per command.
+        """
         digest = hashlib.sha256()
         with open(self.tar_path, "rb") as fh:
-            digest.update(fh.read(8 * 1024 * 1024))
+            for block in iter(lambda: fh.read(1024 * 1024), b""):
+                digest.update(block)
         return {
             "tar": self.tar_path,
             "size_bytes": os.path.getsize(self.tar_path),
-            "sha256_head": digest.hexdigest()[:12],
+            "sha256": digest.hexdigest()[:16],
             "tar_modified": dt.datetime.fromtimestamp(
                 os.path.getmtime(self.tar_path)).isoformat(" ", "seconds"),
             "read_at": dt.datetime.now().isoformat(" ", "seconds"),
@@ -183,8 +196,9 @@ def describe_source(structure):
     """Say which archive a course_structure.json came from, so output can be traced."""
     source = (structure or {}).get("_source") or {}
     if source.get("tar"):
+        sha = source.get("sha256") or source.get("sha256_head") or "?"
         print(f"[OK] Course source: {os.path.basename(source['tar'])} "
-              f"(sha:{source.get('sha256_head', '?')}, read {source.get('read_at', '?')})")
+              f"(sha:{sha}, read {source.get('read_at', '?')})")
     else:
         print("[WARN] course_structure.json records no source archive. Re-run")
         print("       extract_edx.py --tar <archive> to record one.")
@@ -206,13 +220,19 @@ def open_for_structure(structure, explicit_tar=None, allow_stale=False):
     looked and decided.
     """
     source = (structure or {}).get("_source") or {}
-    recorded = source.get("sha256_head")
+    recorded = source.get("sha256")
 
     if not recorded and not allow_stale:
+        # sha256_head was a partial hash of the first 8 MiB; it cannot be
+        # compared against a full-file hash, so a structure carrying only that
+        # is as unverifiable as one carrying nothing.
+        older = " It records only the older partial hash, which cannot be\n" \
+                "  compared against a whole-archive one." if source.get("sha256_head") \
+                else " It was written before provenance was tracked."
         raise CourseArchiveError(
-            "course_structure.json records no source archive, so there is no way\n"
-            "  to tell whether it describes the archive about to be read. It was\n"
-            "  written before provenance was tracked.\n"
+            "course_structure.json records no usable source archive, so there is\n"
+            "  no way to tell whether it describes the archive about to be read."
+            + older + "\n"
             "  Fix:      python extract_edx.py --tar <archive>\n"
             "  Override: --allow-stale (builds anyway, provenance unverified)")
 
@@ -220,7 +240,7 @@ def open_for_structure(structure, explicit_tar=None, allow_stale=False):
     if allow_stale:
         return archive
 
-    current = archive.fingerprint()["sha256_head"]
+    current = archive.fingerprint()["sha256"]
     if recorded == current:
         # Say it once, here, on the path that actually proceeds - callers do
         # not also call describe_source, or every run prints its source twice.

@@ -149,6 +149,38 @@ def unique_name(filename, taken):
     return candidate
 
 
+# Which export and which source URL produced each mp3. Without it, the
+# skip-if-exists below reuses an mp3 whenever the filename matches - and the
+# filename comes from the video's title, which commonly survives a re-record.
+# A second update would then ship last year's audio beside this year's text.
+AUDIO_INDEX_NAME = ".audio_sources.json"
+
+
+def load_audio_index(output_dir):
+    try:
+        with open(os.path.join(output_dir, AUDIO_INDEX_NAME), encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_audio_index(output_dir, index):
+    try:
+        with open(os.path.join(output_dir, AUDIO_INDEX_NAME), "w", encoding="utf-8") as fh:
+            json.dump(index, fh, indent=2, sort_keys=True)
+    except OSError as exc:
+        print(f"[WARN] Could not write {AUDIO_INDEX_NAME}: {exc}")
+
+
+def audio_is_current(index, key, url, archive_sha):
+    """True when the mp3 on disk was built from this URL and this export."""
+    entry = index.get(key)
+    if not isinstance(entry, dict):
+        return False
+    return entry.get("url") == url and entry.get("archive") == archive_sha
+
+
 def clean_html(html_content):
     # Strip HTML tags and normalize whitespace
     text = re.sub('<[^>]*>', ' ', html_content)
@@ -157,6 +189,7 @@ def clean_html(html_content):
 
 
 def organize_course(archive, output_dir, structure=None):
+    """Build per-chapter text and audio. *archive* supplies both and is recorded."""
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
@@ -170,8 +203,12 @@ def organize_course(archive, output_dir, structure=None):
         with open(COURSE_STRUCTURE_PATH, "r", encoding="utf-8") as f:
             structure = json.load(f)
 
+    archive_sha = archive.fingerprint()["sha256"]
+    audio_index = load_audio_index(output_dir)
+
     manifest = []
     video_failures = []
+    reused = rebuilt = 0
 
     for i, chapter in enumerate(structure["chapters"]):
         # Create a clean folder name for the chapter (match old scheme: 01_Welcome___What_..., not 01_1__Welcome_...)
@@ -213,14 +250,26 @@ def organize_course(archive, output_dir, structure=None):
                                     mp3_filename = unique_name(f"{clean_vid_name}.mp3", used_names)
                                     mp3_path = os.path.join(ch_dir, mp3_filename)
 
-                                    # Already converted on an earlier run: reuse it.
-                                    # Without this, a run interrupted at video 15 of 17
-                                    # starts again from the first one.
-                                    if os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 0:
-                                        print(f"   [skip] {mp3_filename} already built")
+                                    # Reuse an mp3 from an earlier run, so a run
+                                    # interrupted at video 15 of 17 does not start
+                                    # again from the first. Only when it was built
+                                    # from this same URL and this same export: the
+                                    # filename comes from the video title, which a
+                                    # re-recorded video commonly keeps.
+                                    index_key = os.path.relpath(mp3_path, output_dir).replace(os.sep, "/")
+                                    on_disk = os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 0
+                                    if on_disk and audio_is_current(audio_index, index_key,
+                                                                    vid_url, archive_sha):
+                                        reused += 1
+                                        print(f"   [skip] {mp3_filename} already built "
+                                              "from this export")
                                         chapter_manifest["files"].append(
                                             {"name": mp3_filename, "path": mp3_path, "type": "audio"})
                                         break
+                                    if on_disk:
+                                        rebuilt += 1
+                                        print(f"   [stale] {mp3_filename} came from a "
+                                              "different export or URL; rebuilding")
 
                                     temp_mp4 = os.path.join(ch_dir, f".{clean_vid_name}.download.mp4")
                                     try:
@@ -229,11 +278,14 @@ def organize_course(archive, output_dir, structure=None):
                                         print(f"   [conv] {mp3_filename} ({human_size(written)})",
                                               flush=True)
                                         extract_audio(temp_mp4, mp3_path)
+                                        audio_index[index_key] = {
+                                            "url": vid_url, "archive": archive_sha}
                                         chapter_manifest["files"].append(
                                             {"name": mp3_filename, "path": mp3_path, "type": "audio"})
                                     except Exception as exc:
                                         print(f"   [FAIL] {video_title[:46]}: {exc}")
                                         video_failures.append((video_title, str(exc)))
+                                        audio_index.pop(index_key, None)
                                         if os.path.exists(mp3_path):
                                             # A partial mp3 would be reused as complete
                                             # by the skip check above.
@@ -272,11 +324,16 @@ def organize_course(archive, output_dir, structure=None):
         for name in assets:
             archive.extract_to(f"static/{name}", os.path.join(static_output, name))
 
+    save_audio_index(output_dir, audio_index)
+
     with open(MANIFEST_PATH, "w", encoding="utf-8") as f:
         # Save relative paths for subagent compatibility
         json.dump(manifest, f, indent=4)
 
     total_files = sum(len(c["files"]) for c in manifest)
+    if reused or rebuilt:
+        print(f"[OK] Audio: {reused} reused from this export, "
+              f"{rebuilt} rebuilt because they came from another.")
     if video_failures:
         print(f"\n[WARN] {len(video_failures)} video(s) failed:")
         for title, reason in video_failures:

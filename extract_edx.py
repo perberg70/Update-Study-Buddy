@@ -141,7 +141,7 @@ def main():
     source = course_data["_source"]
     print(f"[OK] {args.structure_path}")
     print(f"     source: {source['tar']}")
-    print(f"     {source['size_bytes'] / 1048576:.1f} MB, sha:{source['sha256_head']}, "
+    print(f"     {source['size_bytes'] / 1048576:.1f} MB, sha:{source['sha256']}, "
           f"course root: {source['course_root']}")
     print(f"     {len(course_data['chapters'])} chapter(s), "
           f"{source['files_in_archive']} file(s) in the archive")

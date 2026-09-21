@@ -165,7 +165,7 @@ def main() -> int:
 
     fingerprint = archive.fingerprint()
     print(f"[OK] {os.path.basename(tar_path)}")
-    print(f"     sha:{fingerprint['sha256_head']}  "
+    print(f"     sha:{fingerprint['sha256']}  "
           f"course root: {fingerprint['course_root']}  "
           f"{fingerprint['files_in_archive']} file(s)")
 

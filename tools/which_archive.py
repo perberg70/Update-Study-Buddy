@@ -45,7 +45,7 @@ def describe(path):
         return f"  {os.path.basename(path):34} {size:8.1f} MB  {stamp(path)}  [{exc}]"
     fingerprint = archive.fingerprint()
     return (f"  {os.path.basename(path):34} {size:8.1f} MB  {stamp(path)}  "
-            f"sha:{fingerprint['sha256_head']}\n"
+            f"sha:{fingerprint['sha256']}\n"
             f"  {'':34} root: {fingerprint['course_root']}, "
             f"{fingerprint['files_in_archive']} file(s)")
 
@@ -97,7 +97,7 @@ def main() -> int:
         return 0
 
     print(f"  source:  {source['tar']}")
-    print(f"  sha:     {source.get('sha256_head', '?')}")
+    print(f"  sha:     {source.get('sha256', source.get('sha256_head', '?'))}")
     print(f"  read at: {source.get('read_at', '?')}")
     print(f"  root:    {source.get('course_root', '?')}, "
           f"{source.get('files_in_archive', '?')} file(s)")
@@ -117,9 +117,14 @@ def main() -> int:
         print(f"\n  [!] That archive is unreadable now: {exc}")
         return 1
 
-    if now["sha256_head"] != source.get("sha256_head"):
+    recorded = source.get("sha256")
+    if not recorded:
+        print("\n  [!] Recorded with the older partial hash, which cannot be compared")
+        print("      against a whole-archive one. Re-run extract_edx.py to record it.")
+        return 1
+    if now["sha256"] != recorded:
         print("\n  [!] The file at that path has changed since it was parsed")
-        print(f"      (recorded sha:{source.get('sha256_head')}, now sha:{now['sha256_head']}).")
+        print(f"      (recorded sha:{recorded}, now sha:{now['sha256']}).")
         print("      Re-run extract_edx.py before building anything from it.")
         return 1
 
