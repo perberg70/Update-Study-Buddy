@@ -29,13 +29,13 @@ import xml.etree.ElementTree as ET
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import COURSE_STRUCTURE_PATH, EXTRACT_DIR, TRANSCRIPTS_DIR  # noqa: E402
-from extract_edx import find_course_root  # noqa: E402
+from config import COURSE_STRUCTURE_PATH, TRANSCRIPTS_DIR  # noqa: E402
+from olx_archive import CourseArchiveError, open_course_archive  # noqa: E402
 from build_module_pdf import group_modules, module_label  # noqa: E402
 from video_report import youtube_id  # noqa: E402
 
 
-def youtube_videos(modules, course_root):
+def youtube_videos(modules, archive):
     """(module, url_name, title, video_id) for every YouTube-hosted video."""
     found = []
     for module in modules:
@@ -46,11 +46,11 @@ def youtube_videos(modules, course_root):
                         if comp.get("type") != "video":
                             continue
                         url_name = comp.get("url_name")
-                        path = os.path.join(course_root, "video", f"{url_name}.xml")
-                        if not os.path.exists(path):
+                        xml = archive.read_text(f"video/{url_name}.xml")
+                        if xml is None:
                             continue
                         try:
-                            root = ET.parse(path).getroot()
+                            root = ET.fromstring(xml)
                         except Exception:
                             continue
                         vid = youtube_id(root)
@@ -98,6 +98,9 @@ def main() -> int:
                         help="list what would be fetched, contact nobody")
     parser.add_argument("--force", action="store_true",
                         help="refetch even when a transcript already exists")
+    parser.add_argument("--tar", dest="tar_path",
+                        help="course .tar.gz to read (default: the one "
+                             "course_structure.json was built from)")
     args = parser.parse_args()
 
     if not os.path.exists(COURSE_STRUCTURE_PATH):
@@ -112,12 +115,12 @@ def main() -> int:
             return 1
 
     try:
-        course_root = find_course_root(EXTRACT_DIR)
-    except FileNotFoundError as exc:
+        archive = open_course_archive(args.tar_path)
+    except (CourseArchiveError, FileNotFoundError) as exc:
         print(f"[FAIL] {exc}")
         return 1
 
-    videos = youtube_videos(modules, course_root)
+    videos = youtube_videos(modules, archive)
     if not videos:
         print("No YouTube-hosted videos found.")
         return 0

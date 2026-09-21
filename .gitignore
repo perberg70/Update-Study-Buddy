@@ -1,7 +1,6 @@
-# Course exports and extracted content. These are large, and they are the
+# Course exports and generated content. These are large, and they are the
 # course's data rather than this tool's source.
 *.tar.gz
-edx_export/
 Organized_Course_Content/
 
 # Pipeline state. Regenerated on every run, and current_sources.json holds the

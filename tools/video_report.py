@@ -23,7 +23,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import glob
 import html
 import json
 import os
@@ -33,8 +32,8 @@ import xml.etree.ElementTree as ET
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import COURSE_STRUCTURE_PATH, EXTRACT_DIR  # noqa: E402
-from extract_edx import find_course_root  # noqa: E402
+from config import COURSE_STRUCTURE_PATH  # noqa: E402
+from olx_archive import CourseArchiveError, open_course_archive  # noqa: E402
 from build_module_pdf import group_modules, module_label, transcript_candidates  # noqa: E402
 
 YOUTUBE_ATTRS = ("youtube_id_1_0", "youtube_id", "youtube")
@@ -86,7 +85,7 @@ def has_direct_mp4(video_root):
                for a in video_root.findall(".//video_asset/encoded_video"))
 
 
-def inspect(chapter, course_root):
+def inspect(chapter, archive):
     """One row per video component in *chapter*."""
     rows = []
     for seq in chapter.get("sequentials", []):
@@ -95,20 +94,20 @@ def inspect(chapter, course_root):
                 if comp.get("type") != "video":
                     continue
                 url_name = comp.get("url_name")
-                path = os.path.join(course_root, "video", f"{url_name}.xml")
+                xml = archive.read_text(f"video/{url_name}.xml")
                 row = {"unit": seq.get("title", ""), "subunit": vert.get("title", ""),
                        "title": url_name, "duration": 0.0, "mp4": False,
                        "youtube": "", "transcripts": [], "referenced": 0, "readable": False}
-                if os.path.exists(path):
+                if xml is not None:
                     try:
-                        root = ET.parse(path).getroot()
+                        root = ET.fromstring(xml)
                         row["readable"] = True
                         row["title"] = html.unescape(
                             root.get("display_name") or vert.get("title") or url_name)
                         row["duration"] = parse_duration(root)
                         row["mp4"] = has_direct_mp4(root)
                         row["youtube"] = youtube_id(root)
-                        row["transcripts"] = transcript_candidates(root, course_root)
+                        row["transcripts"] = transcript_candidates(root, archive)
                         row["referenced"] = len(root.findall(".//transcript")) + \
                             bool(root.get("transcripts")) + bool(root.get("sub"))
                     except Exception:
@@ -128,6 +127,9 @@ def main() -> int:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--module", help="limit to one module number")
     parser.add_argument("--verbose", action="store_true", help="list every video")
+    parser.add_argument("--tar", dest="tar_path",
+                        help="course .tar.gz to read (default: the one "
+                             "course_structure.json was built from)")
     args = parser.parse_args()
 
     if not os.path.exists(COURSE_STRUCTURE_PATH):
@@ -142,8 +144,8 @@ def main() -> int:
             return 1
 
     try:
-        course_root = find_course_root(EXTRACT_DIR)
-    except FileNotFoundError as exc:
+        archive = open_course_archive(args.tar_path)
+    except (CourseArchiveError, FileNotFoundError) as exc:
         print(f"[FAIL] {exc}")
         return 1
 
@@ -151,7 +153,7 @@ def main() -> int:
               "youtube": 0, "mp4": 0, "referenced": 0, "no_source": 0}
 
     for module in modules:
-        rows = [r for ch in module["chapters"] for r in inspect(ch, course_root)]
+        rows = [r for ch in module["chapters"] for r in inspect(ch, archive)]
         if not rows:
             continue
         secs = sum(r["duration"] for r in rows)
@@ -182,9 +184,8 @@ def main() -> int:
                 if row["referenced"] and not row["transcripts"]:
                     print(f"     {'':12} references a transcript, but the file is missing")
 
-    static = os.path.join(course_root, "static")
-    on_disk = sorted(glob.glob(os.path.join(static, "*.srt")) +
-                     glob.glob(os.path.join(static, "*.sjson")))
+    on_disk = sorted(f"static/{name}" for name in archive.listdir("static")
+                     if name.lower().endswith((".srt", ".sjson")))
 
     print("\n" + "=" * 68)
     print(f"  videos                    {totals['videos']}")
@@ -196,7 +197,7 @@ def main() -> int:
     print(f"  direct .mp4               {totals['mp4']}")
     print(f"  no obtainable source      {totals['no_source']}")
     print()
-    print(f"  transcript files in {static}: {len(on_disk)}")
+    print(f"  transcript files in the archive's static/: {len(on_disk)}")
     for path in on_disk[:10]:
         print(f"    {os.path.basename(path)}")
     if len(on_disk) > 10:

@@ -3,51 +3,48 @@
 Run: python tests/test_video_report.py
 """
 
-import io
 import json
 import os
 import sys
 import tempfile
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _fixtures import open_archive  # noqa: E402
 
 from video_report import inspect, parse_duration, youtube_id, has_direct_mp4  # noqa: E402
 import xml.etree.ElementTree as ET  # noqa: E402
 
 
 def build_fixture(base):
-    course = os.path.join(base, "course")
-    os.makedirs(os.path.join(course, "video"))
-    os.makedirs(os.path.join(course, "static"))
-    w = lambda p, t: io.open(p, "w", encoding="utf-8").write(t)
+    files = {
+        "course.xml": '<course url_name="r"/>',
 
-    w(f"{course}/video/v1.xml", '<video display_name="Has Transcript" sub="abc">'
-      '<video_asset client_video_id="a.mp4" duration="300">'
-      '<encoded_video url="https://x/a.mp4"/></video_asset></video>')
-    w(f"{course}/static/subs_abc.srt.sjson", json.dumps({"text": ["hello"]}))
+        "video/v1.xml": '<video display_name="Has Transcript" sub="abc">'
+                        '<video_asset client_video_id="a.mp4" duration="300">'
+                        '<encoded_video url="https://x/a.mp4"/></video_asset></video>',
+        "static/subs_abc.srt.sjson": json.dumps({"text": ["hello"]}),
 
-    w(f"{course}/video/v2.xml", '<video display_name="Broken Reference">'
-      '<video_asset client_video_id="b.mp4" duration="1800">'
-      '<encoded_video url="https://x/b.mp4"/></video_asset>'
-      '<transcript language="en" src="missing.srt"/></video>')
+        "video/v2.xml": '<video display_name="Broken Reference">'
+                        '<video_asset client_video_id="b.mp4" duration="1800">'
+                        '<encoded_video url="https://x/b.mp4"/></video_asset>'
+                        '<transcript language="en" src="missing.srt"/></video>',
 
-    w(f"{course}/video/v3.xml",
-      '<video display_name="YouTube Hosted" youtube_id_1_0="1.00:dQw4w9WgXcQ">'
-      '<video_asset duration="2700"/></video>')
-
+        "video/v3.xml": '<video display_name="YouTube Hosted" '
+                        'youtube_id_1_0="1.00:dQw4w9WgXcQ">'
+                        '<video_asset duration="2700"/></video>',
+    }
     chapter = {"title": "1. Test", "sequentials": [{"title": "U", "verticals": [
         {"title": "S", "components": [{"type": "video", "url_name": f"v{i}"}
                                       for i in (1, 2, 3)]}]}]}
-    return course, chapter
+    return open_archive(os.path.join(base, "course.test.tar.gz"), files), chapter
 
 
 def main():
     failures = []
     with tempfile.TemporaryDirectory() as base:
-        course, chapter = build_fixture(base)
-        rows = {r["title"]: r for r in inspect(chapter, course)}
+        archive, chapter = build_fixture(base)
+        rows = {r["title"]: r for r in inspect(chapter, archive)}
 
         if len(rows) != 3:
             failures.append(f"expected 3 videos, got {len(rows)}")

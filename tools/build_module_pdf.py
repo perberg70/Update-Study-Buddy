@@ -29,9 +29,10 @@ from xml.sax.saxutils import escape as xml_escape
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import (COURSE_STRUCTURE_PATH, EXTRACT_DIR,  # noqa: E402
+from config import (COURSE_STRUCTURE_PATH,  # noqa: E402
                     ORGANIZED_CONTENT_DIR, TRANSCRIPTS_DIR)
-from extract_edx import find_course_root  # noqa: E402
+from olx_archive import (CourseArchiveError, describe_source,  # noqa: E402
+                         open_course_archive)
 
 MODULE_NUMBER_RE = re.compile(r"^\s*(\d+)")
 NO_TRANSCRIPT = "[no transcript in export]"
@@ -150,49 +151,50 @@ class HtmlToBlocks(HTMLParser):
         self._flush()
 
 
-def html_blocks(path):
+def html_blocks(archive, relpath):
     try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
-            parser = HtmlToBlocks()
-            parser.feed(fh.read())
-            parser.close()
-            return parser.blocks
+        parser = HtmlToBlocks()
+        parser.feed(archive.read_text(relpath) or "")
+        parser.close()
+        return parser.blocks
     except Exception as exc:
-        return [("para", f"[could not read {os.path.basename(path)}: {exc}]")]
+        return [("para", f"[could not read {os.path.basename(relpath)}: {exc}]")]
 
 
 # --------------------------------------------------------------------------
 # Video transcripts
 # --------------------------------------------------------------------------
 
-def transcript_candidates(video_root, course_root):
-    """Transcript files an OLX <video> element points at, that actually exist."""
-    static = os.path.join(course_root, "static")
+def transcript_candidates(video_root, archive):
+    """Transcript members an OLX <video> points at, that the archive actually holds.
+
+    Returned as archive-relative paths ("static/subs_abc.srt.sjson").
+    """
     paths = []
 
     for node in video_root.findall(".//transcript"):
         src = (node.get("src") or "").strip()
         if src:
-            paths.append(os.path.join(static, os.path.basename(src)))
+            paths.append("static/" + os.path.basename(src))
 
     raw = video_root.get("transcripts")
     if raw:
         try:
             for value in json.loads(html.unescape(raw)).values():
                 if value:
-                    paths.append(os.path.join(static, os.path.basename(str(value))))
+                    paths.append("static/" + os.path.basename(str(value)))
         except Exception:
             pass
 
     sub = (video_root.get("sub") or "").strip()
     if sub:
-        paths.append(os.path.join(static, f"subs_{sub}.srt.sjson"))
-        paths.append(os.path.join(static, f"{sub}.srt.sjson"))
-        paths.append(os.path.join(static, f"{sub}.srt"))
+        paths.append(f"static/subs_{sub}.srt.sjson")
+        paths.append(f"static/{sub}.srt.sjson")
+        paths.append(f"static/{sub}.srt")
 
     seen, existing = set(), []
     for path in paths:
-        if path not in seen and os.path.exists(path):
+        if path not in seen and archive.exists(path):
             seen.add(path)
             existing.append(path)
     return existing
@@ -207,11 +209,29 @@ TIMECODE_RE = re.compile(r"-->")
 
 
 def read_transcript(path):
-    """Plain text of a .sjson, .srt, .vtt or .txt transcript."""
+    """Plain text of a transcript file on disk (the transcript store)."""
     try:
         with open(path, "r", encoding="utf-8-sig", errors="ignore") as fh:
             raw = fh.read()
     except Exception:
+        return ""
+    return transcript_text(raw, path)
+
+
+def archive_transcript(archive, relpath):
+    """Plain text of a transcript member inside the course archive."""
+    data = archive.read_bytes(relpath)
+    if data is None:
+        return ""
+    return transcript_text(data.decode("utf-8-sig", "ignore"), relpath)
+
+
+def transcript_text(raw, name=""):
+    """Plain text of .sjson, .srt, .vtt or .txt transcript content.
+
+    *name* is used only to tell a plain-text transcript from a cue-based one.
+    """
+    if not raw:
         return ""
 
     if raw.lstrip().startswith("{"):
@@ -221,7 +241,7 @@ def read_transcript(path):
         except Exception:
             pass
 
-    if path.lower().endswith(".txt"):
+    if name.lower().endswith(".txt"):
         return " ".join(raw.split())
 
     out, speaker = [], None
@@ -265,15 +285,15 @@ def stored_transcript(url_name, title, transcripts_dir):
     return ""
 
 
-def video_entry(url_name, vertical_title, course_root, stats, transcripts_dir=None):
-    """(title, transcript_text) for one video component."""
-    path = os.path.join(course_root, "video", f"{url_name}.xml")
+def video_entry(url_name, vertical_title, archive, stats, transcripts_dir=None):
+    """(title, transcript text) for one video component."""
+    xml = archive.read_text(f"video/{url_name}.xml")
     title = vertical_title or url_name
-    if not os.path.exists(path):
+    if xml is None:
         stats["video_missing"] += 1
         return title, NO_TRANSCRIPT
     try:
-        root = ET.parse(path).getroot()
+        root = ET.fromstring(xml)
     except Exception:
         stats["video_missing"] += 1
         return title, NO_TRANSCRIPT
@@ -281,8 +301,8 @@ def video_entry(url_name, vertical_title, course_root, stats, transcripts_dir=No
     title = html.unescape(root.get("display_name") or vertical_title or url_name)
     stats["videos"] += 1
 
-    for candidate in transcript_candidates(root, course_root):
-        text = read_transcript(candidate)
+    for candidate in transcript_candidates(root, archive):
+        text = archive_transcript(archive, candidate)
         if text:
             stats["transcripts"] += 1
             stats["from_olx"] += 1
@@ -395,7 +415,7 @@ def build_styles(fonts=None):
     return styles
 
 
-def module_story(module, course_root, styles, stats, unicode_ok=True,
+def module_story(module, archive, styles, stats, unicode_ok=True,
                  transcripts_dir=None):
     """Flowables for one module, in course order."""
     from reportlab.platypus import Paragraph, Spacer
@@ -423,11 +443,11 @@ def module_story(module, course_root, styles, stats, unicode_ok=True,
                     ctype, url_name = comp.get("type"), comp.get("url_name")
 
                     if ctype == "html":
-                        path = os.path.join(course_root, "html", f"{url_name}.html")
-                        if not os.path.exists(path):
+                        relpath = f"html/{url_name}.html"
+                        if not archive.exists(relpath):
                             continue
                         stats["html"] += 1
-                        for kind, text in html_blocks(path):
+                        for kind, text in html_blocks(archive, relpath):
                             if kind == "head":
                                 story.append(para(text, styles["inner"]))
                             elif kind == "item":
@@ -437,7 +457,7 @@ def module_story(module, course_root, styles, stats, unicode_ok=True,
 
                     elif ctype == "video":
                         title, text = video_entry(url_name, vert.get("title", ""),
-                                                  course_root, stats, transcripts_dir)
+                                                  archive, stats, transcripts_dir)
                         story.append(para(f"Video: {title}", styles["inner"]))
                         story.append(para(text, styles["video"]))
 
@@ -472,18 +492,6 @@ def write_pdf(path, module, story):
 
 # --------------------------------------------------------------------------
 
-def describe_source(structure):
-    """Say which archive this structure came from, so a document can be traced."""
-    source = structure.get("_source") or {}
-    if source.get("tar"):
-        print(f"[OK] Course source: {os.path.basename(source['tar'])} "
-              f"(sha:{source.get('sha256_head', '?')}, extracted {source.get('extracted_at', '?')})")
-    else:
-        print("[WARN] course_structure.json records no source archive. Re-run")
-        print("       extract_edx.py to record one, or tools/verify_extract.py to")
-        print("       work out which archive the extracted files came from.")
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -492,6 +500,9 @@ def main() -> int:
     parser.add_argument("--out-dir", default=ORGANIZED_CONTENT_DIR)
     parser.add_argument("--transcripts-dir", default=TRANSCRIPTS_DIR,
                         help="directory of transcripts keyed by video url_name")
+    parser.add_argument("--tar", dest="tar_path",
+                        help="course .tar.gz to read (default: the one "
+                             "course_structure.json was built from)")
     args = parser.parse_args()
 
     if not os.path.exists(COURSE_STRUCTURE_PATH):
@@ -524,8 +535,8 @@ def main() -> int:
     module = chosen[0]
 
     try:
-        course_root = find_course_root(EXTRACT_DIR)
-    except FileNotFoundError as exc:
+        archive = open_course_archive(args.tar_path)
+    except (CourseArchiveError, FileNotFoundError) as exc:
         print(f"[FAIL] {exc}")
         return 1
 
@@ -544,7 +555,7 @@ def main() -> int:
 
     stats = {"units": 0, "subunits": 0, "html": 0, "videos": 0, "transcripts": 0,
              "from_olx": 0, "from_store": 0, "video_missing": 0, "skipped": {}}
-    story = module_story(module, course_root, styles, stats, unicode_ok=bool(fonts),
+    story = module_story(module, archive, styles, stats, unicode_ok=bool(fonts),
                          transcripts_dir=args.transcripts_dir)
 
     os.makedirs(args.out_dir, exist_ok=True)

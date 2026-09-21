@@ -13,9 +13,9 @@ import sys
 import tempfile
 import xml.etree.ElementTree as ET
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _fixtures import make_archive  # noqa: E402
 
 import fetch_youtube_transcripts as fyt  # noqa: E402
 from video_report import youtube_id  # noqa: E402
@@ -40,21 +40,23 @@ ID_CASES = [
 ]
 
 
+VIDEOS = [("ok", "idOK"), ("disabled", "idDIS"), ("missing", "idNONE"),
+          ("boom", "idERR"), ("empty", "idEMPTY")]
+
+
 def build_course(base):
-    course = os.path.join(base, "course")
-    os.makedirs(os.path.join(course, "video"))
-    w = lambda p, t: io.open(p, "w", encoding="utf-8").write(t)
-    w(f"{course}/course.xml", '<course url_name="r"/>')
-    for name, vid in [("ok", "idOK"), ("disabled", "idDIS"),
-                      ("missing", "idNONE"), ("boom", "idERR"), ("empty", "idEMPTY")]:
-        w(f"{course}/video/{name}.xml",
-          f'<video display_name="{name}" youtube_id_1_0="1.00:{vid}"/>')
+    files = {"course.xml": '<course url_name="r"/>'}
+    for name, vid in VIDEOS:
+        files[f"video/{name}.xml"] = (
+            f'<video display_name="{name}" youtube_id_1_0="1.00:{vid}"/>')
+    tar = make_archive(os.path.join(base, "course.yt.tar.gz"), files)
+
     structure = {"chapters": [{"title": "1. M", "sequentials": [{"title": "U", "verticals": [
         {"title": "S", "components": [{"type": "video", "url_name": n}
-                                      for n in ("ok", "disabled", "missing", "boom", "empty")]}]}]}]}
+                                      for n, _ in VIDEOS]}]}]}]}
     path = os.path.join(base, "structure.json")
     json.dump(structure, io.open(path, "w", encoding="utf-8"))
-    return course, path
+    return tar, path
 
 
 def main():
@@ -66,7 +68,7 @@ def main():
             failures.append(f"{why}: expected {expected!r}, got {got!r}")
 
     with tempfile.TemporaryDirectory() as base:
-        course, structure = build_course(base)
+        tar, structure = build_course(base)
         store = os.path.join(base, "transcripts")
 
         def stub(video_id, languages):
@@ -83,10 +85,8 @@ def main():
         real_fetch, real_argv = fyt.fetch_captions, sys.argv
         fyt.fetch_captions = stub
         sys.argv = ["fetch_youtube_transcripts.py",
-                    "--transcripts-dir", store]
-        os.environ["COURSE_STRUCTURE_PATH"] = structure
+                    "--transcripts-dir", store, "--tar", tar]
         fyt.COURSE_STRUCTURE_PATH = structure
-        fyt.EXTRACT_DIR = base
         try:
             code = fyt.main()
         finally:

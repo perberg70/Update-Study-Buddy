@@ -1,4 +1,10 @@
-"""Extraction provenance and stale-file cleanup.
+"""Reading the course from its archive: provenance, and no blending.
+
+The defect this replaces: extract_edx.py unpacked into edx_export/ without
+clearing it, so a second export left every file of the first in place and a
+course could carry its structure from one export and its content from another.
+Reading from the archive makes that structurally impossible - these tests hold
+that line rather than checking a cleanup step.
 
 Run: python tests/test_provenance.py
 """
@@ -7,93 +13,117 @@ import io
 import json
 import os
 import sys
-import tarfile
 import tempfile
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _fixtures import make_archive, open_archive  # noqa: E402
 
 import extract_edx  # noqa: E402
+from olx_archive import CourseArchive, CourseArchiveError, open_course_archive  # noqa: E402
 
 
-def build_archive(base, name, chapters, orphans=()):
-    src = os.path.join(base, f"src_{name}")
-    for sub in ("course", "chapter", "sequential", "vertical", "html"):
-        os.makedirs(os.path.join(src, sub), exist_ok=True)
-    w = lambda p, t: io.open(os.path.join(src, p), "w", encoding="utf-8").write(t)
-    w("course.xml", '<course url_name="run"/>')
-    w("course/run.xml", "<course>" + "".join(
-        f'<chapter url_name="ch{i}"/>' for i in range(1, chapters + 1)) + "</course>")
+def course(name, chapters, extra=None):
+    """A minimal but complete OLX tree as {relative path: text}."""
+    files = {
+        "course.xml": '<course url_name="run"/>',
+        "course/run.xml": "<course>" + "".join(
+            f'<chapter url_name="ch{i}"/>' for i in range(1, chapters + 1)) + "</course>",
+    }
     for i in range(1, chapters + 1):
-        w(f"chapter/ch{i}.xml", f'<chapter display_name="{i}. Ch {i}">'
-          f'<sequential url_name="s{i}"/></chapter>')
-        w(f"sequential/s{i}.xml", f'<sequential display_name="U{i}">'
-          f'<vertical url_name="v{i}"/></sequential>')
-        w(f"vertical/v{i}.xml", f'<vertical display_name="S{i}"><html url_name="h{i}"/></vertical>')
-        w(f"html/h{i}.html", f"<p>{name} chapter {i}</p>")
-    for orphan in orphans:
-        w(f"html/{orphan}.html", f"<p>stale {orphan}</p>")
-
-    path = os.path.join(base, f"course.{name}.tar.gz")
-    with tarfile.open(path, "w:gz") as tar:
-        for dirpath, _dirs, files in os.walk(src):
-            for f in files:
-                full = os.path.join(dirpath, f)
-                tar.add(full, arcname=os.path.relpath(full, src))
-    return path
+        files[f"chapter/ch{i}.xml"] = (f'<chapter display_name="{i}. Ch {i}">'
+                                       f'<sequential url_name="s{i}"/></chapter>')
+        files[f"sequential/s{i}.xml"] = (f'<sequential display_name="U{i}">'
+                                         f'<vertical url_name="v{i}"/></sequential>')
+        files[f"vertical/v{i}.xml"] = (f'<vertical display_name="S{i}">'
+                                       f'<html url_name="h{i}"/></vertical>')
+        files[f"html/h{i}.html"] = f"<p>{name} chapter {i}</p>"
+    files.update(extra or {})
+    return files
 
 
 def main():
     failures = []
     with tempfile.TemporaryDirectory() as base:
-        old = build_archive(base, "OLD", 3, orphans=["orphan1", "orphan2"])
-        new = build_archive(base, "NEW", 2)
-        out = os.path.join(base, "edx_export")
-        structure = os.path.join(base, "structure.json")
-        extract_edx.COURSE_STRUCTURE_PATH = structure
+        old_files = course("OLD", 3, {"html/orphan.html": "<p>stale</p>"})
+        old = make_archive(os.path.join(base, "course.OLD.tar.gz"), old_files)
+        new = make_archive(os.path.join(base, "course.NEW.tar.gz"), course("NEW", 2))
 
-        extract_edx.extract_and_parse(old, out)
-        html_dir = os.path.join(out, "html")
-        if not os.path.exists(os.path.join(html_dir, "orphan1.html")):
-            failures.append("setup: OLD should have produced orphan files")
+        structure_path = os.path.join(base, "structure.json")
 
-        # --keep reproduces the original defect.
-        extract_edx.extract_and_parse(new, out, clean=False)
-        if not os.path.exists(os.path.join(html_dir, "orphan1.html")):
-            failures.append("--keep should leave stale files (that is its purpose)")
+        def run(tar):
+            sys.argv = ["extract_edx.py", "--tar", tar, "--out", structure_path]
+            code = extract_edx.main()
+            with io.open(structure_path, encoding="utf-8") as fh:
+                return code, json.load(fh)
 
-        # The default must clear them.
-        extract_edx.extract_and_parse(new, out)
-        left = sorted(os.listdir(html_dir))
-        if left != ["h1.html", "h2.html"]:
-            failures.append(f"clean extract should leave only NEW's files, got {left}")
+        code, data = run(old)
+        if code != 0 or len(data.get("chapters", [])) != 3:
+            failures.append(f"OLD should parse to 3 chapters, got {len(data.get('chapters', []))}")
 
-        with io.open(structure, encoding="utf-8") as fh:
-            data = json.load(fh)
+        # The point of the change: parsing NEW cannot see anything of OLD.
+        code, data = run(new)
+        if len(data.get("chapters", [])) != 2:
+            failures.append(f"NEW should parse to 2 chapters, got {len(data.get('chapters', []))}")
+
+        archive = CourseArchive(new)
+        if archive.exists("html/orphan.html"):
+            failures.append("a file only OLD contains must not be reachable from NEW")
+        if archive.read_text("html/h1.html") != "<p>NEW chapter 1</p>":
+            failures.append("content must come from the archive being read")
+
         source = data.get("_source") or {}
         if os.path.basename(source.get("tar", "")) != "course.NEW.tar.gz":
             failures.append(f"provenance should name the archive, got {source.get('tar')!r}")
-        for field in ("sha256_head", "size_bytes", "extracted_at", "tar_modified"):
+        for field in ("sha256_head", "size_bytes", "read_at", "tar_modified",
+                      "files_in_archive", "course_root"):
             if not source.get(field):
                 failures.append(f"provenance missing {field}")
-        if len(data.get("chapters", [])) != 2:
-            failures.append("structure should hold NEW's 2 chapters")
 
-        # Two different archives must fingerprint differently.
-        old_fp = extract_edx.archive_fingerprint(old)
-        new_fp = extract_edx.archive_fingerprint(new)
-        if old_fp["sha256_head"] == new_fp["sha256_head"]:
+        if (CourseArchive(old).fingerprint()["sha256_head"]
+                == archive.fingerprint()["sha256_head"]):
             failures.append("distinct archives produced the same fingerprint")
+
+        # The recorded archive is what later steps open, not the newest file.
+        os.utime(old, None)  # OLD is now newest by mtime - as OneDrive makes it
+        cwd = os.getcwd()
+        try:
+            os.chdir(base)
+            chosen = open_course_archive(structure_path=structure_path)
+        finally:
+            os.chdir(cwd)
+        if os.path.basename(chosen.tar_path) != "course.NEW.tar.gz":
+            failures.append(f"later steps should reopen the recorded archive, "
+                            f"got {os.path.basename(chosen.tar_path)}")
+
+        # Layout independence: root, course/-wrapped, and run-named all agree.
+        parsed = []
+        for prefix in ("", "course", "HV+GenAI+HT26"):
+            arc = open_archive(os.path.join(base, f"layout_{prefix or 'root'}.tar.gz"),
+                               course("L", 2), prefix=prefix)
+            parsed.append(json.dumps(extract_edx.parse_course(arc), sort_keys=True))
+        if len(set(parsed)) != 1:
+            failures.append("the three archive layouts parsed differently")
+
+        # An archive with no course.xml must say so, and say what it did find.
+        junk = make_archive(os.path.join(base, "junk.tar.gz"), {"notes/readme.txt": "hi"})
+        try:
+            CourseArchive(junk)
+            failures.append("an archive without course.xml should be rejected")
+        except CourseArchiveError as exc:
+            if "notes" not in str(exc):
+                failures.append(f"the rejection should list what was found: {exc}")
 
     for msg in failures:
         print(f"  [FAIL] {msg}")
     if not failures:
-        print("  [PASS] stale files cleared by default, kept with --keep")
-        print("  [PASS] source archive recorded and fingerprints differ")
+        print("  [PASS] a second export cannot see the first one's files")
+        print("  [PASS] source archive recorded, reopened by later steps, "
+              "fingerprints differ")
+        print("  [PASS] root / course/ / run-named layouts parse identically")
     return not failures
 
 
 if __name__ == "__main__":
-    print("extraction provenance")
+    print("archive provenance")
     raise SystemExit(0 if main() else 1)

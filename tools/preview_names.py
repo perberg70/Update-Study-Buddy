@@ -7,12 +7,13 @@ extract_edx.py alone. This scores those predicted names against the notebook's
 current sources so you can see, before spending that time, how many will match.
 
 Usage:
-    python extract_edx.py          # fast: unpack + parse XML, no downloads
+    python extract_edx.py          # fast: parse the archive's XML, no downloads
     python tools/preview_names.py
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -21,14 +22,14 @@ import xml.etree.ElementTree as ET
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import compare_sources as cs  # noqa: E402
-from config import COURSE_STRUCTURE_PATH, CURRENT_SOURCES_FILE, EXTRACT_DIR  # noqa: E402
-from extract_edx import find_course_root  # noqa: E402
+from config import COURSE_STRUCTURE_PATH, CURRENT_SOURCES_FILE  # noqa: E402
+from olx_archive import (CourseArchiveError, describe_source,  # noqa: E402
+                         open_course_archive)
 from organize_content import chapter_dir_name, video_output_name  # noqa: E402
 
 
-def predicted_names(structure, extract_dir):
+def predicted_names(structure, archive):
     """Names organize_content.py would produce, as (name, type, chapter) tuples."""
-    course_root = find_course_root(extract_dir)
     out = []
     for index, chapter in enumerate(structure["chapters"]):
         ch_name = chapter_dir_name(index, chapter["title"])
@@ -38,20 +39,15 @@ def predicted_names(structure, extract_dir):
             for vert in seq.get("verticals", []):
                 for comp in vert.get("components", []):
                     if comp["type"] == "html":
-                        html_path = os.path.join(
-                            course_root, "html", f"{comp['url_name']}.html"
-                        )
-                        if os.path.exists(html_path):
+                        if archive.exists(f"html/{comp['url_name']}.html"):
                             has_html = True
 
                     elif comp["type"] == "video":
-                        xml_path = os.path.join(
-                            course_root, "video", f"{comp['url_name']}.xml"
-                        )
-                        if not os.path.exists(xml_path):
+                        xml = archive.read_text(f"video/{comp['url_name']}.xml")
+                        if xml is None:
                             continue
                         try:
-                            root = ET.parse(xml_path).getroot()
+                            root = ET.fromstring(xml)
                         except Exception:
                             continue
                         # organize_content only emits an mp3 when a direct mp4 exists.
@@ -69,22 +65,17 @@ def predicted_names(structure, extract_dir):
     return out
 
 
-def describe_source(structure):
-    """Say which archive this structure came from, so a document can be traced."""
-    source = structure.get("_source") or {}
-    if source.get("tar"):
-        print(f"[OK] Course source: {os.path.basename(source['tar'])} "
-              f"(sha:{source.get('sha256_head', '?')}, extracted {source.get('extracted_at', '?')})")
-    else:
-        print("[WARN] course_structure.json records no source archive. Re-run")
-        print("       extract_edx.py to record one, or tools/verify_extract.py to")
-        print("       work out which archive the extracted files came from.")
-
-
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--tar", dest="tar_path",
+                        help="course .tar.gz to read (default: the one "
+                             "course_structure.json was built from)")
+    args = parser.parse_args()
+
     if not os.path.exists(COURSE_STRUCTURE_PATH):
         print(f"[FAIL] {COURSE_STRUCTURE_PATH} not found. Run extract_edx.py first")
-        print("       (that step only unpacks and parses XML - no downloads).")
+        print("       (that step only parses the archive's XML - no downloads).")
         return 1
 
     with open(COURSE_STRUCTURE_PATH, "r", encoding="utf-8") as fh:
@@ -92,12 +83,15 @@ def main() -> int:
     describe_source(structure)
 
     try:
-        names = predicted_names(structure, EXTRACT_DIR)
-    except FileNotFoundError as exc:
+        archive = open_course_archive(args.tar_path)
+    except (CourseArchiveError, FileNotFoundError) as exc:
         print(f"[FAIL] {exc}")
         return 1
+
+    names = predicted_names(structure, archive)
     if not names:
-        print("[FAIL] No names predicted. Is edx_export/ populated?")
+        print("[FAIL] No names predicted - the archive holds no html or video "
+              "component the structure refers to.")
         return 1
 
     audio = sum(1 for _, t, _ in names if t == "audio")

@@ -9,6 +9,7 @@ import socket
 import sys
 
 from config import CDP_URL, resolve_tar_path
+from olx_archive import CourseArchive, CourseArchiveError
 
 
 def check_python() -> bool:
@@ -46,13 +47,28 @@ def check_cdp_port() -> bool:
 
 
 def check_tarball() -> bool:
+    """Confirm the export is not just present but readable as an OLX course.
+
+    Opening it here costs one pass over the archive and turns "course.xml not
+    found" - which used to surface mid-run - into a preflight answer.
+    """
     try:
         path = resolve_tar_path()
-        print(f"[OK] edX export detected: {path}")
-        return True
     except Exception as exc:
         print(f"[WARN] No default edX export detected ({exc})")
         return False
+
+    try:
+        archive = CourseArchive(path)
+    except CourseArchiveError as exc:
+        print(f"[FAIL] {path} is not a readable course archive: {exc}")
+        return False
+
+    fingerprint = archive.fingerprint()
+    print(f"[OK] edX export readable: {path}")
+    print(f"     sha:{fingerprint['sha256_head']}, course root: "
+          f"{fingerprint['course_root']}, {fingerprint['files_in_archive']} file(s)")
+    return True
 
 
 def main() -> int:

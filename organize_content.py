@@ -1,17 +1,28 @@
+"""Turn a parsed course into per-chapter text and audio for the notebook.
+
+Content is read straight out of the course archive. Nothing is unpacked to a
+shared directory first, so a run cannot pick up leftovers from a previous
+export - see olx_archive.py.
+
+Usage:
+    python organize_content.py
+    python organize_content.py --tar course.hp_m6v88.tar.gz
+"""
+
+import argparse
 import os
 import sys
 import time
 import xml.etree.ElementTree as ET
 import json
-import shutil
 import re
 import subprocess
 import urllib.request
 import html
 
 from config import (COURSE_STRUCTURE_PATH, DOWNLOAD_RETRIES, DOWNLOAD_TIMEOUT,
-                    EXTRACT_DIR, MANIFEST_PATH, ORGANIZED_CONTENT_DIR)
-from extract_edx import find_course_root
+                    MANIFEST_PATH, ORGANIZED_CONTENT_DIR)
+from olx_archive import CourseArchiveError, open_course_archive
 
 
 def slugify(text):
@@ -145,7 +156,7 @@ def clean_html(html_content):
     return text
 
 
-def organize_course(extract_dir, output_dir):
+def organize_course(archive, output_dir):
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
@@ -157,13 +168,6 @@ def organize_course(extract_dir, output_dir):
 
     with open(struct_path, "r", encoding="utf-8") as f:
         structure = json.load(f)
-
-    # The archive may or may not wrap everything in a course/ directory.
-    try:
-        course_root = find_course_root(extract_dir)
-    except FileNotFoundError as exc:
-        print(f"Error: {exc}")
-        sys.exit(1)
 
     manifest = []
     video_failures = []
@@ -183,22 +187,17 @@ def organize_course(extract_dir, output_dir):
                 for comp in vert["components"]:
                     # 1. Process HTML Content
                     if comp["type"] == "html":
-                        html_path = os.path.join(course_root, "html", f"{comp['url_name']}.html")
-                        if os.path.exists(html_path):
-                            try:
-                                with open(html_path, "r", encoding="utf-8") as hf:
-                                    merged_text.append(clean_html(hf.read()))
-                            except Exception as e:
-                                print(f"Error reading HTML {comp['url_name']}: {e}")
+                        raw = archive.read_text(f"html/{comp['url_name']}.html")
+                        if raw is not None:
+                            merged_text.append(clean_html(raw))
                     
                     # 2. Process Video Content (Download & Convert)
                     elif comp["type"] == "video":
-                        video_xml_path = os.path.join(course_root, "video", f"{comp['url_name']}.xml")
-                        if os.path.exists(video_xml_path):
+                        video_xml = archive.read_text(f"video/{comp['url_name']}.xml")
+                        if video_xml is not None:
                             try:
-                                tree = ET.parse(video_xml_path)
-                                root = tree.getroot()
-                                
+                                root = ET.fromstring(video_xml)
+
                                 video_title = root.get("display_name", comp["url_name"])
                                 clean_vid_name = video_output_name(
                                     root, vert.get("title", ""), comp["url_name"]
@@ -265,15 +264,12 @@ def organize_course(extract_dir, output_dir):
 
     # Process Global Assets (Existing documents/audio)
     static_output = os.path.join(output_dir, "Global_Assets")
-    static_src = os.path.join(course_root, "static")
-    if os.path.exists(static_src):
+    assets = [f for f in archive.listdir("static")
+              if os.path.splitext(f)[1].lower() in (".pdf", ".docx", ".xlsx", ".txt")]
+    if assets:
         os.makedirs(static_output, exist_ok=True)
-        for f in os.listdir(static_src):
-            src_f = os.path.join(static_src, f)
-            if os.path.isfile(src_f):
-                ext = os.path.splitext(f)[1].lower()
-                if ext in [".pdf", ".docx", ".xlsx", ".txt"]:
-                    shutil.copy2(src_f, os.path.join(static_output, f))
+        for name in assets:
+            archive.extract_to(f"static/{name}", os.path.join(static_output, name))
 
     with open(MANIFEST_PATH, "w", encoding="utf-8") as f:
         # Save relative paths for subagent compatibility
@@ -288,5 +284,24 @@ def organize_course(extract_dir, output_dir):
     print(f"[OK] Organization complete: {total_files} file(s) in {MANIFEST_PATH}")
     return 1 if video_failures else 0
 
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--tar", dest="tar_path",
+                        help="course .tar.gz to read (default: the one "
+                             "course_structure.json was built from)")
+    parser.add_argument("--out-dir", default=ORGANIZED_CONTENT_DIR)
+    args = parser.parse_args()
+
+    try:
+        archive = open_course_archive(args.tar_path)
+    except (CourseArchiveError, FileNotFoundError) as exc:
+        print(f"Error: {exc}")
+        return 1
+
+    print(f"[OK] Reading {os.path.basename(archive.tar_path)}")
+    return organize_course(archive, args.out_dir)
+
+
 if __name__ == "__main__":
-    raise SystemExit(organize_course(EXTRACT_DIR, ORGANIZED_CONTENT_DIR))
+    raise SystemExit(main())

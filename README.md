@@ -21,7 +21,7 @@ The pipeline runs in two phases when you execute `run_full_update.py`:
 | Step | Script | What it does |
 |------|--------|--------------|
 | **0** | `export_current_sources.py` | Connects to Chrome (CDP), opens your NotebookLM notebook, scrapes the **Sources** panel, and writes `current_sources.json`. |
-| **1** | `extract_edx.py` | Extracts the edX `.tar.gz` into `edx_export/` and parses course structure into `course_structure.json`. |
+| **1** | `extract_edx.py` | Parses the edX `.tar.gz` into `course_structure.json`, recording which archive it read. Nothing is unpacked. |
 | **2** | `organize_content.py` | Builds `Organized_Course_Content/` by chapter: merges HTML into `.txt`, downloads video assets and converts to MP3, writes `processing_manifest.json`. |
 | **3** | `compare_sources.py` | Compares cleaned notebook sources vs edX content and writes `comparison_review.json` with suggested actions (`REPLACE`, `ADD`, `KEEP`, etc.). |
 
@@ -96,8 +96,9 @@ python run_full_update.py
 - `python delete_agent.py --dedupe-current --dry-run` — **list** which titles appear more than once. Safe and useful.
 - `python delete_agent.py --dedupe-current` — **refuses to run.** See "Deduplication is retired" below.
 - `python delete_agent.py --fuzzy` — match sources on shared words instead of exact titles. **Unsafe.** On a real 144-source notebook this made 78% of titles match some *other* source, because chapter-prefixed filenames share most of their words. Only with `--dry-run` first.
-- `python extract_edx.py` — extract and parse the newest `course*.tar.gz` (or pass `--tar <file> --out <dir>`).
-- `python organize_content.py` — build organized content and manifest.
+- `python extract_edx.py` — parse the newest `course*.tar.gz` (or pass `--tar <file> --out <path>`).
+- `python organize_content.py` — build organized content and manifest, from the archive `extract_edx.py` recorded (or pass `--tar`).
+- `python tools/which_archive.py` — show which archives are present and which one the pipeline is reading.
 - `python compare_sources.py` — generate `comparison_review.json` for review.
 - `python compare_sources.py --apply` — apply the reviewed plan (delete + upload).
 - `python delete_agent.py` — delete sources per `comparison_review.json`.
@@ -114,7 +115,8 @@ Update Study Buddy/
 ├── export_current_sources.py     # Step 0/2: scrape NotebookLM Sources → current_sources.json
 ├── delete_agent.py               # Delete sources during apply; --dedupe-current is opt-in, not automatic
 ├── notebooklm_client.py          # Shared CDP connection + tab selection
-├── extract_edx.py                # Step 3: unpack .tar.gz (safe extraction) → edx_export/ + course_structure.json
+├── extract_edx.py                # Step 3: parse .tar.gz (no unpacking) → course_structure.json
+├── olx_archive.py                # Reads the OLX tree straight out of the .tar.gz
 ├── organize_content.py           # Step 4: build Organized_Course_Content/ + processing_manifest.json
 ├── compare_sources.py            # Step 5: compare & match → comparison_review.json; --apply executes Step 6-7
 ├── upload_agent.py               # Step 7: upload sources (REPLACE / ADD) to NotebookLM
@@ -124,7 +126,6 @@ Update Study Buddy/
 ├── processing_manifest.json      # Files per chapter: { name, path, type } (from organize)
 ├── comparison_review.json        # Review plan: pairs + current_only + new_only with actions
 │
-├── edx_export/                   # Raw course files (from extract)
 ├── Organized_Course_Content/     # Chapter folders with .txt and .mp3 (from organize)
 │
 ├── course.*.tar.gz               # Your edX export
@@ -161,24 +162,28 @@ everything), so a working export removes the need for routine deduplication.
 
 ### Which archive did this come from?
 
-`extract_edx.py` records the source archive — path, size, a hash prefix, and when it was
-extracted — into `course_structure.json` under `_source`. `build_module_pdf.py` and
-`preview_names.py` print it, so any generated document can be traced back to its export.
+**Nothing is unpacked.** Every step reads the course straight out of the `.tar.gz`
+(`olx_archive.py`). This used to work differently: `extract_edx.py` unpacked into
+`edx_export/` and never cleared it, so extracting a second export left behind every file
+the first contained — producing a course whose structure came from one export and whose
+content came from another, with nothing recording which. That directory is gone, and with
+it the only way two exports could blend.
 
-It also **clears the extraction directory by default**. Extracting over an existing one
-leaves behind every file the new archive does not contain, which produces a course whose
-structure comes from one export and whose content comes from another. Pass `--keep` to
-extract over the top deliberately.
+`extract_edx.py` records what it read — path, size, a hash prefix, the course root inside
+the archive, and when it was read — into `course_structure.json` under `_source`. Every
+later step reopens **that same archive** rather than guessing again, and
+`build_module_pdf.py` and `preview_names.py` print it, so any generated document can be
+traced back to its export.
 
-If you already have a directory of uncertain origin:
+To see what you have:
 
 ```powershell
-python tools/verify_extract.py
+python tools/which_archive.py
 ```
 
-It compares every `course*.tar.gz` it can find against what is on disk and reports how much
-of each archive is present, and how many files are present that the archive does not
-contain — which is what a mixed extraction looks like.
+It lists every `course*.tar.gz` it can find with its hash and course root, shows what
+`course_structure.json` records, and exits non-zero if that archive has gone missing or
+changed since it was parsed.
 
 **Note on automatic selection:** with no `--tar`, the newest `course*.tar.gz` by
 modification time is used. OneDrive updates mtimes on sync, so "newest" can mean "most
