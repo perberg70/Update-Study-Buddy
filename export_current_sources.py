@@ -19,13 +19,15 @@ def run_export():
     with sync_playwright() as p:
         try:
             browser, page = connect(p)
-            print(f"[OK] Connected via CDP. Driving tab: {describe_page(page)}")
+            print(f"[OK] Connected via CDP. Starting from tab: {describe_page(page)}")
         except BrowserConnectionError as e:
             print(f"[FAIL] {e}")
             sys.exit(1)
 
         page.goto(PROJECT_URL, wait_until="domcontentloaded")
         page.wait_for_load_state("load")
+        # Report the page actually scraped, not the tab's previous URL.
+        print(f"[OK] Scraping: {describe_page(page)}")
 
         page.get_by_role("button", name=re.compile(r"(\+\s*)?Add\s+source|Lägg\s+till\s+källa", re.I)).first.wait_for(
             state="visible", timeout=30_000
