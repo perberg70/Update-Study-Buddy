@@ -22,6 +22,13 @@ PROJECT_URL = os.getenv(
 NOTEBOOK_HOSTS = ("notebook.google.com", "notebooklm.google.com")
 CDP_URL = os.getenv("NOTEBOOKLM_CDP_URL", "http://localhost:9222")
 
+# Where the course export lives. A dedicated folder keeps 400 MB archives out
+# of the project root and makes "which export is this?" answerable by opening
+# one directory. The root is still searched, so an archive already sitting
+# there keeps working.
+PROJECT_DIR = Path(__file__).resolve().parent
+EXPORTS_DIR = Path(os.getenv("EDX_EXPORTS_DIR", str(PROJECT_DIR / "course_exports")))
+
 CURRENT_SOURCES_FILE = os.getenv("CURRENT_SOURCES_FILE", "current_sources.json")
 MANIFEST_PATH = os.getenv("PROCESSING_MANIFEST_PATH", "processing_manifest.json")
 REVIEW_PATH = os.getenv("COMPARISON_REVIEW_PATH", "comparison_review.json")
@@ -101,19 +108,58 @@ def normalize_action(value: str) -> str:
     return aliases.get(cleaned, cleaned)
 
 
+def search_dirs() -> list:
+    """Directories searched for a course export, in order of authority."""
+    out, seen = [], set()
+    for directory in (EXPORTS_DIR, PROJECT_DIR, Path.cwd()):
+        try:
+            resolved = directory.resolve()
+        except OSError:
+            continue
+        if resolved not in seen:
+            seen.add(resolved)
+            out.append(resolved)
+    return out
+
+
+def find_exports() -> tuple:
+    """(chosen directory, its archives, archives found elsewhere).
+
+    The first directory holding any archive wins, so course_exports/ is
+    authoritative once it is in use. Archives elsewhere are still returned, so
+    a caller can mention them - a file being ignored should never be silent.
+    """
+    chosen, here, elsewhere = None, [], []
+    for directory in search_dirs():
+        found = sorted(p for p in directory.glob("course*.tar.gz") if p.is_file())
+        if not found:
+            continue
+        if chosen is None:
+            chosen, here = directory, found
+        else:
+            elsewhere.extend(found)
+    return chosen, here, elsewhere
+
+
+def describe_export(path: Path) -> str:
+    return (f"{path.name}  ({path.stat().st_size / 1048576:.1f} MB, "
+            f"modified {_mtime(path)})")
+
+
 def resolve_tar_path(explicit_path: Optional[str] = None) -> str:
     """Resolve the course tarball path.
 
     Priority:
     1) explicit_path argument,
     2) EDX_TAR_PATH env var,
-    3) the only course*.tar.gz in cwd - and only if there is exactly one.
+    3) the only course*.tar.gz in the first directory that has one -
+       course_exports/, then the project folder, then the working directory.
 
     This used to take the newest by modification time when several matched.
     That is not the same as the newest export: OneDrive rewrites mtimes on
     sync, so the pick could change without any new export, silently, with
-    nothing in the output naming which file was read. Several archives now
-    means the caller has to say which one.
+    nothing in the output naming which file was read. Several archives in the
+    same folder now means the caller has to say which one.
     """
     if explicit_path:
         return explicit_path
@@ -122,27 +168,26 @@ def resolve_tar_path(explicit_path: Optional[str] = None) -> str:
     if from_env:
         return from_env
 
-    candidates = [Path(p) for p in glob.glob("course*.tar.gz") if Path(p).is_file()]
-    if not candidates:
+    chosen, here, _elsewhere = find_exports()
+    if not here:
         raise FileNotFoundError(
-            "No edX export found. Provide --tar, set EDX_TAR_PATH, or place "
-            "course*.tar.gz in the project folder."
+            "No edX export found. Put the course .tar.gz in:\n"
+            f"    {EXPORTS_DIR}\n"
+            "  then run: python start_run.py\n"
+            "  Or pass --tar \"<file>\", or set EDX_TAR_PATH."
         )
 
-    if len(candidates) > 1:
-        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        listing = "\n".join(
-            f"    {p.name}  ({p.stat().st_size / 1048576:.1f} MB, modified "
-            f"{_mtime(p)})" for p in candidates)
+    if len(here) > 1:
+        listing = "\n".join(f"    {describe_export(p)}" for p in here)
         raise FileNotFoundError(
-            f"{len(candidates)} course archives are present and none was named:\n"
+            f"{len(here)} course archives in {chosen} and none was named:\n"
             f"{listing}\n"
-            "  Pass --tar \"<file>\" (or set EDX_TAR_PATH) to say which to read.\n"
+            "  Keep one and remove the others, or pass --tar \"<file>\".\n"
             "  Picking by date is not safe here: OneDrive updates modification\n"
             "  times on sync, so the newest file is not the newest export."
         )
 
-    return str(candidates[0])
+    return str(here[0])
 
 
 def _mtime(path: Path) -> str:

@@ -160,6 +160,24 @@ Resolve duplicates in the notebook UI, where you can open each source. Duplicate
 themselves caused by a broken export (comparison saw no existing sources and re-uploaded
 everything), so a working export removes the need for routine deduplication.
 
+### Where the course export goes
+
+Put the `.tar.gz` from edX Studio (**Tools → Export**) in `course_exports/`, then:
+
+```powershell
+python start_run.py
+```
+
+It finds the export, confirms it really is a course archive, records which one it read,
+and prints the commands to run next. Run it at the start of every update — the two
+questions that have caused the most trouble here are *where does the export go* and
+*which one is being read*, and this answers both before any work happens.
+
+Search order: `--tar`, then `EDX_TAR_PATH`, then the first of `course_exports/`, the
+project folder and the working directory that holds a `course*.tar.gz`. **Two in the same
+folder and no `--tar` refuses and lists both** rather than choosing. An archive in a
+lower-priority location is reported as ignored, never silently passed over.
+
 ### Which archive did this come from?
 
 **Nothing is unpacked.** Every step reads the course straight out of the `.tar.gz`

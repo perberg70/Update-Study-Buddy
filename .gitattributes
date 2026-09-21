@@ -16,5 +16,7 @@
 *.docx binary
 *.xlsx binary
 *.url text eol=crlf
-README.md merge=union
-course_update.md merge=union
+
+# No merge=union on the docs. It resolves a conflict by keeping BOTH sides,
+# which turns contradictory prose into duplicated prose instead of surfacing
+# the conflict - exactly what documentation must not do.

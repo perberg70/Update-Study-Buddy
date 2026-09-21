@@ -156,7 +156,7 @@ def check_tarball() -> bool:
     try:
         path = resolve_tar_path()
     except Exception as exc:
-        print(f"[WARN] No default edX export detected ({exc})")
+        print(f"[WARN] No usable edX export: {exc}")
         return False
 
     try:
