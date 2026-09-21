@@ -1,6 +1,9 @@
 import argparse
+import datetime as dt
+import hashlib
 import json
 import os
+import shutil
 import sys
 import tarfile
 import xml.etree.ElementTree as ET
@@ -75,10 +78,36 @@ def find_course_root(extract_dir: str) -> str:
     )
 
 
-def extract_and_parse(tar_path: str, extract_dir: str):
+def archive_fingerprint(tar_path):
+    """Enough to identify the archive an extraction came from."""
+    digest = hashlib.sha256()
+    try:
+        with open(tar_path, "rb") as fh:
+            digest.update(fh.read(8 * 1024 * 1024))
+        size = os.path.getsize(tar_path)
+        mtime = dt.datetime.fromtimestamp(os.path.getmtime(tar_path)).isoformat(" ", "seconds")
+    except OSError:
+        return {}
+    return {
+        "tar": os.path.abspath(tar_path),
+        "size_bytes": size,
+        "sha256_head": digest.hexdigest()[:12],
+        "tar_modified": mtime,
+        "extracted_at": dt.datetime.now().isoformat(" ", "seconds"),
+    }
+
+
+def extract_and_parse(tar_path: str, extract_dir: str, clean: bool = True):
     if not os.path.exists(tar_path):
         print(f"Error: {tar_path} not found. Place the edX course export .tar.gz in this folder.")
         sys.exit(1)
+
+    # Extracting over an existing directory leaves behind any file the new
+    # archive does not contain, so the result can blend two course versions -
+    # a correct structure pointing at stale content. Clearing is the default.
+    if clean and os.path.isdir(extract_dir) and os.listdir(extract_dir):
+        print(f"Clearing {extract_dir} (pass --keep to extract over it instead)...")
+        shutil.rmtree(extract_dir)
     if not os.path.exists(extract_dir):
         os.makedirs(extract_dir)
 
@@ -149,15 +178,26 @@ def extract_and_parse(tar_path: str, extract_dir: str):
                 chapter_obj["sequentials"].append(seq_obj)
         course_data["chapters"].append(chapter_obj)
 
+    # Record where this came from. Without it there is no way to tell which
+    # archive produced a given course_structure.json, or the PDFs built from it.
+    course_data["_source"] = archive_fingerprint(tar_path)
+
     with open(COURSE_STRUCTURE_PATH, "w", encoding="utf-8") as f:
         json.dump(course_data, f, indent=4)
     print(f"Structure saved to {COURSE_STRUCTURE_PATH}")
+    source = course_data["_source"]
+    if source:
+        print(f"   source: {os.path.basename(source['tar'])} "
+              f"({source['size_bytes'] / 1048576:.1f} MB, sha:{source['sha256_head']})")
+    print(f"   {len(course_data['chapters'])} chapter(s)")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Extract and parse an edX course export.")
     parser.add_argument("--tar", dest="tar_path", help="Path to course .tar.gz export")
     parser.add_argument("--out", dest="extract_dir", default=EXTRACT_DIR, help="Extraction output directory")
+    parser.add_argument("--keep", action="store_true",
+                        help="extract over the existing directory instead of clearing it")
     return parser.parse_args()
 
 
@@ -168,4 +208,4 @@ if __name__ == "__main__":
     except FileNotFoundError as exc:
         print(f"Error: {exc}")
         sys.exit(1)
-    extract_and_parse(tar_path, args.extract_dir)
+    extract_and_parse(tar_path, args.extract_dir, clean=not args.keep)

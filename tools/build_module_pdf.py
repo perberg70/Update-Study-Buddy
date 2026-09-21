@@ -472,6 +472,18 @@ def write_pdf(path, module, story):
 
 # --------------------------------------------------------------------------
 
+def describe_source(structure):
+    """Say which archive this structure came from, so a document can be traced."""
+    source = structure.get("_source") or {}
+    if source.get("tar"):
+        print(f"[OK] Course source: {os.path.basename(source['tar'])} "
+              f"(sha:{source.get('sha256_head', '?')}, extracted {source.get('extracted_at', '?')})")
+    else:
+        print("[WARN] course_structure.json records no source archive. Re-run")
+        print("       extract_edx.py to record one, or tools/verify_extract.py to")
+        print("       work out which archive the extracted files came from.")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -486,7 +498,9 @@ def main() -> int:
         print(f"[FAIL] {COURSE_STRUCTURE_PATH} not found. Run extract_edx.py first.")
         return 1
     with open(COURSE_STRUCTURE_PATH, "r", encoding="utf-8") as fh:
-        modules = group_modules(json.load(fh).get("chapters", []))
+        structure = json.load(fh)
+    modules = group_modules(structure.get("chapters", []))
+    describe_source(structure)
 
     if args.list or not args.module:
         print(f"{len(modules)} module(s):\n")

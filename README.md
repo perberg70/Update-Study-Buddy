@@ -159,6 +159,32 @@ Resolve duplicates in the notebook UI, where you can open each source. Duplicate
 themselves caused by a broken export (comparison saw no existing sources and re-uploaded
 everything), so a working export removes the need for routine deduplication.
 
+### Which archive did this come from?
+
+`extract_edx.py` records the source archive — path, size, a hash prefix, and when it was
+extracted — into `course_structure.json` under `_source`. `build_module_pdf.py` and
+`preview_names.py` print it, so any generated document can be traced back to its export.
+
+It also **clears the extraction directory by default**. Extracting over an existing one
+leaves behind every file the new archive does not contain, which produces a course whose
+structure comes from one export and whose content comes from another. Pass `--keep` to
+extract over the top deliberately.
+
+If you already have a directory of uncertain origin:
+
+```powershell
+python tools/verify_extract.py
+```
+
+It compares every `course*.tar.gz` it can find against what is on disk and reports how much
+of each archive is present, and how many files are present that the archive does not
+contain — which is what a mixed extraction looks like.
+
+**Note on automatic selection:** with no `--tar`, the newest `course*.tar.gz` by
+modification time is used. OneDrive updates mtimes on sync, so "newest" can mean "most
+recently synced" rather than "most recently exported". Pass `--tar` explicitly when it
+matters.
+
 ### Video downloads
 
 `organize_content.py` fetches and transcodes every video with a direct `.mp4`, which for

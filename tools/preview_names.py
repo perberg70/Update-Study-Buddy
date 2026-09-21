@@ -69,6 +69,18 @@ def predicted_names(structure, extract_dir):
     return out
 
 
+def describe_source(structure):
+    """Say which archive this structure came from, so a document can be traced."""
+    source = structure.get("_source") or {}
+    if source.get("tar"):
+        print(f"[OK] Course source: {os.path.basename(source['tar'])} "
+              f"(sha:{source.get('sha256_head', '?')}, extracted {source.get('extracted_at', '?')})")
+    else:
+        print("[WARN] course_structure.json records no source archive. Re-run")
+        print("       extract_edx.py to record one, or tools/verify_extract.py to")
+        print("       work out which archive the extracted files came from.")
+
+
 def main() -> int:
     if not os.path.exists(COURSE_STRUCTURE_PATH):
         print(f"[FAIL] {COURSE_STRUCTURE_PATH} not found. Run extract_edx.py first")
@@ -77,6 +89,7 @@ def main() -> int:
 
     with open(COURSE_STRUCTURE_PATH, "r", encoding="utf-8") as fh:
         structure = json.load(fh)
+    describe_source(structure)
 
     try:
         names = predicted_names(structure, EXTRACT_DIR)
