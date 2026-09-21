@@ -132,6 +132,31 @@ def main():
         except Exception as exc:
             check(failures, False, f"expected RuntimeError, got {type(exc).__name__}: {exc}")
 
+    # Two OpenMP runtimes abort the process on Windows rather than raising, so
+    # the variable has to be set before the backend is touched - the user had
+    # to do it by hand, which is the bug.
+    saved = os.environ.pop("KMP_DUPLICATE_LIB_OK", None)
+    try:
+        try:
+            tv.load_transcriber("small")
+        except RuntimeError:
+            pass
+        check(failures, os.environ.get("KMP_DUPLICATE_LIB_OK") == "TRUE",
+              "KMP_DUPLICATE_LIB_OK should be set before loading the backend")
+
+        # A value the operator chose must survive.
+        os.environ["KMP_DUPLICATE_LIB_OK"] = "FALSE"
+        try:
+            tv.load_transcriber("small")
+        except RuntimeError:
+            pass
+        check(failures, os.environ["KMP_DUPLICATE_LIB_OK"] == "FALSE",
+              "an explicitly set KMP_DUPLICATE_LIB_OK must not be overwritten")
+    finally:
+        os.environ.pop("KMP_DUPLICATE_LIB_OK", None)
+        if saved is not None:
+            os.environ["KMP_DUPLICATE_LIB_OK"] = saved
+
     for msg in failures:
         print(f"  [FAIL] {msg}")
     if not failures:
@@ -139,6 +164,7 @@ def main():
         print("         already-transcribed all skipped with a stated reason")
         print("  [PASS] --force and --max-minutes behave; hidden units excluded")
         print("  [PASS] a missing backend explains the local install")
+        print("  [PASS] KMP_DUPLICATE_LIB_OK set automatically, explicit value kept")
     return not failures
 
 

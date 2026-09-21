@@ -4,12 +4,72 @@ Usage:
     python preflight.py
 """
 
+import os
 import shutil
 import socket
+import subprocess
 import sys
 
 from config import CDP_URL, resolve_tar_path
-from olx_archive import CourseArchive, CourseArchiveError
+
+# olx_archive is imported inside check_tarball, not here. On a checkout that
+# predates it - main, say - a module-scope import raises ModuleNotFoundError
+# before any check runs, so the one command that would have said "you are on
+# the wrong branch" is the one command that cannot start. Checking the code
+# must not depend on the code being complete.
+
+REPO_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _git(*args):
+    """Run a git command in the repo. Returns stdout, or None if it failed."""
+    try:
+        result = subprocess.run(("git",) + args, cwd=REPO_DIR, capture_output=True,
+                                check=False, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def check_repo_state() -> bool:
+    """Say which version of this tool is about to run.
+
+    Every other check here asks about the environment; this one asks about the
+    code, which is the thing most likely to be wrong. The tooling lives on a
+    feature branch, so `git checkout main` leaves a pipeline that is missing
+    most of its scripts and says nothing about it.
+
+    No fetch: a network call here could hang the one command you run to find
+    out why things are hanging. The comparison is against the last-fetched
+    ref, and the output says so.
+    """
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD")
+    if branch is None:
+        print("[WARN] Not a git checkout - cannot tell which version this is.")
+        return True
+
+    head = _git("rev-parse", "--short", "HEAD") or "?"
+    print(f"[OK] Code: branch {branch} at {head}")
+
+    dirty = _git("status", "--porcelain")
+    if dirty:
+        count = len(dirty.splitlines())
+        print(f"     [!] {count} uncommitted change(s) - `git pull` may refuse or merge.")
+
+    upstream = _git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+    if upstream is None:
+        # This is how "I ran git pull and nothing happened" happens.
+        print(f"     [FAIL] {branch} tracks no remote branch, so `git pull` does")
+        print(f"            nothing. Fix: git pull origin {branch}")
+        return False
+
+    behind = _git("rev-list", "--count", "HEAD..@{u}")
+    if behind and behind != "0":
+        print(f"     [!] {behind} commit(s) behind {upstream} as of the last fetch.")
+        print(f"         Run: git pull origin {branch}")
+    else:
+        print(f"     up to date with {upstream} as of the last fetch")
+    return True
 
 
 def check_python() -> bool:
@@ -53,6 +113,13 @@ def check_tarball() -> bool:
     found" - which used to surface mid-run - into a preflight answer.
     """
     try:
+        from olx_archive import CourseArchive, CourseArchiveError
+    except ImportError:
+        print("[WARN] olx_archive.py is missing from this checkout - the export")
+        print("       cannot be read. See the branch reported above.")
+        return False
+
+    try:
         path = resolve_tar_path()
     except Exception as exc:
         print(f"[WARN] No default edX export detected ({exc})")
@@ -73,18 +140,26 @@ def check_tarball() -> bool:
 
 def main() -> int:
     print("--- Update Study Buddy preflight ---")
-    checks = [
-        check_python(),
-        check_playwright(),
-        check_ffmpeg(),
-        check_cdp_port(),
-        check_tarball(),
-    ]
+    # Named, not positional: the pass condition used to index into this list, so
+    # inserting a check silently changed which ones were required.
+    results = {
+        "code": check_repo_state(),
+        "python": check_python(),
+        "playwright": check_playwright(),
+        "ffmpeg": check_ffmpeg(),
+        "cdp": check_cdp_port(),
+        "export": check_tarball(),
+    }
+    # The CDP port and the export are only needed by some steps, so neither
+    # fails preflight on its own - both report [WARN] above.
+    required = ("code", "python", "playwright", "ffmpeg")
+
     print("------------------------------------")
-    if checks[0] and checks[1] and checks[2]:
+    failed = [name for name in required if not results[name]]
+    if not failed:
         print("Preflight passed (core dependencies available).")
         return 0
-    print("Preflight failed. Fix items marked [FAIL] and run again.")
+    print(f"Preflight failed: {', '.join(failed)}. Fix items marked [FAIL] and run again.")
     return 1
 
 

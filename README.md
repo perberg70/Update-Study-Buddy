@@ -207,6 +207,31 @@ generated document without ever being on the page:
 `build_module_pdf.py` skips both by default and **says what it skipped** — a silent drop
 would be as bad as a silent inclusion. `--include-hidden` keeps everything.
 
+### Structure and content must come from the same export
+
+A document takes its skeleton from `course_structure.json` and its text from the archive.
+Nothing forced those to be the same export, and when they are not you get a document whose
+structure says one thing and whose text says another.
+
+`build_module_pdf.py`, `transcribe_videos.py` and `organize_content.py` now **refuse** to
+run when `course_structure.json` records no source archive, or records a different one
+from the archive being read. A warning was not enough: the last one printed correctly,
+above sixty lines of output, and was gone by the time it mattered.
+
+```
+[FAIL] course_structure.json was parsed from a different archive than the
+  one being read. The document would take its structure from one
+  export and its content from another.
+  structure came from: sha:3ff949c4077e (course.hp_m6v88.tar.gz)
+  about to read:       sha:a91be0771d23 (course.old.tar.gz)
+  Fix:      python extract_edx.py --tar course.old.tar.gz
+  Override: --allow-stale (builds anyway, provenance unverified)
+```
+
+The read-only reporters (`video_report.py`, `preview_names.py`, `find_text.py`,
+`which_archive.py`) still only warn — they produce no document, and `which_archive.py`
+exists precisely to be run when things are inconsistent.
+
 To trace a specific phrase back to its source:
 
 ```powershell
@@ -242,6 +267,11 @@ It needs one of:
 pip install faster-whisper     # recommended: several times quicker on CPU
 pip install openai-whisper     # alternative; pulls in torch
 ```
+
+On Windows, `ctranslate2` and numpy/MKL each load their own Intel OpenMP runtime, which
+aborts the process with `OMP: Error #15`. The tool sets `KMP_DUPLICATE_LIB_OK=TRUE` for
+its own run and says so — you should not need `set KMP_DUPLICATE_LIB_OK=TRUE` yourself. If
+an abort happens anyway, setting it in the shell first still works.
 
 It transcribes only what nothing cheaper already covers, and only short videos —
 `--max-minutes` (default 20) keeps hour-long webinars out, since their Teams export is

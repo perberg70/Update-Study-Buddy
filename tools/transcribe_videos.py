@@ -37,8 +37,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import COURSE_STRUCTURE_PATH, TRANSCRIPTS_DIR  # noqa: E402
-from olx_archive import (CourseArchiveError, describe_source,  # noqa: E402
-                         open_course_archive)
+from olx_archive import CourseArchiveError, open_for_structure  # noqa: E402
 from build_module_pdf import (group_modules, module_label,  # noqa: E402
                               stored_transcript, transcript_candidates)
 from video_report import has_direct_mp4, parse_duration, youtube_id  # noqa: E402
@@ -128,14 +127,42 @@ def _classify(comp, vert, archive, transcripts_dir, max_minutes, force):
     return row
 
 
+OMP_HINT = (
+    "If this still aborts with OMP: Error #15, set the variable yourself before\n"
+    "  running:  set KMP_DUPLICATE_LIB_OK=TRUE")
+
+
 def load_transcriber(model_name):
     """A local transcribe(path) -> text, from whichever backend is installed."""
+    # ctranslate2 (faster-whisper's backend) and numpy/MKL each ship their own
+    # Intel OpenMP runtime. Loading both aborts the process on Windows with
+    # "OMP: Error #15" - an abort, not an exception, so there is nothing to
+    # catch and nothing useful in the output. Setting this before the import
+    # is the documented workaround.
+    #
+    # setdefault, not assignment: a value the operator set deliberately wins.
+    # Announced rather than silent, because this suppresses a real
+    # duplicate-runtime condition rather than fixing it.
+    if "KMP_DUPLICATE_LIB_OK" not in os.environ:
+        os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+        print("[INFO] KMP_DUPLICATE_LIB_OK=TRUE set for this run (two OpenMP "
+              "runtimes would\n       otherwise abort the process on Windows).")
+
     try:
         from faster_whisper import WhisperModel
     except ImportError:
         pass
+    except Exception as exc:
+        raise RuntimeError(f"faster-whisper failed to load: {exc}\n  {OMP_HINT}")
     else:
-        model = WhisperModel(model_name, device="cpu", compute_type="int8")
+        try:
+            model = WhisperModel(model_name, device="cpu", compute_type="int8")
+        except Exception as exc:
+            raise RuntimeError(
+                f"faster-whisper could not load the {model_name!r} model: {exc}\n"
+                f"  A model name must be one of tiny/base/small/medium/large-v3.\n"
+                f"  The first run downloads it, so this can also be a network failure.\n"
+                f"  {OMP_HINT}")
 
         def transcribe(path):
             segments, _info = model.transcribe(path, vad_filter=True)
@@ -190,6 +217,9 @@ def main() -> int:
     parser.add_argument("--tar", dest="tar_path",
                         help="course .tar.gz to read (default: the one "
                              "course_structure.json was built from)")
+    parser.add_argument("--allow-stale", action="store_true",
+                        help="run even when course_structure.json and the archive "
+                             "disagree about which export they came from")
     parser.add_argument("--dry-run", action="store_true",
                         help="show the plan and an estimate; download nothing")
     parser.add_argument("--force", action="store_true",
@@ -204,7 +234,6 @@ def main() -> int:
         return 1
     with open(COURSE_STRUCTURE_PATH, "r", encoding="utf-8") as fh:
         structure = json.load(fh)
-    describe_source(structure)
 
     modules = group_modules(structure.get("chapters", []))
     if args.module:
@@ -214,7 +243,7 @@ def main() -> int:
             return 1
 
     try:
-        archive = open_course_archive(args.tar_path)
+        archive = open_for_structure(structure, args.tar_path, args.allow_stale)
     except (CourseArchiveError, FileNotFoundError) as exc:
         print(f"[FAIL] {exc}")
         return 1

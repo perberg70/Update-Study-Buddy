@@ -20,7 +20,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _fixtures import make_archive, open_archive  # noqa: E402
 
 import extract_edx  # noqa: E402
-from olx_archive import CourseArchive, CourseArchiveError, open_course_archive  # noqa: E402
+from olx_archive import (CourseArchive, CourseArchiveError,  # noqa: E402
+                         open_course_archive, open_for_structure)
 
 
 def course(name, chapters, extra=None):
@@ -96,6 +97,40 @@ def main():
             failures.append(f"later steps should reopen the recorded archive, "
                             f"got {os.path.basename(chosen.tar_path)}")
 
+        # A document must not be built from a structure and an archive that
+        # disagree - the failure this whole change exists to prevent.
+        with io.open(structure_path, encoding="utf-8") as fh:
+            new_structure = json.load(fh)
+
+        got = open_for_structure(new_structure, new)
+        if os.path.basename(got.tar_path) != "course.NEW.tar.gz":
+            failures.append("matching structure and archive should just open")
+
+        try:
+            open_for_structure(new_structure, old)
+            failures.append("a structure/archive mismatch must be refused")
+        except CourseArchiveError as exc:
+            for want in ("course.NEW.tar.gz", "course.OLD.tar.gz", "extract_edx.py"):
+                if want not in str(exc):
+                    failures.append(f"the mismatch message should name {want}: {exc}")
+
+        if os.path.basename(
+                open_for_structure(new_structure, old, allow_stale=True).tar_path
+        ) != "course.OLD.tar.gz":
+            failures.append("--allow-stale should proceed despite a mismatch")
+
+        # A structure written before provenance was tracked has no _source at
+        # all: its origin is unknowable, so it is refused rather than guessed.
+        try:
+            open_for_structure({"chapters": []}, new)
+            failures.append("a structure with no _source must be refused")
+        except CourseArchiveError as exc:
+            if "extract_edx.py --tar" not in str(exc):
+                failures.append(f"the message should name the fix command: {exc}")
+
+        if open_for_structure({"chapters": []}, new, allow_stale=True) is None:
+            failures.append("--allow-stale should proceed with no _source")
+
         # Layout independence: root, course/-wrapped, and run-named all agree.
         parsed = []
         for prefix in ("", "course", "HV+GenAI+HT26"):
@@ -121,6 +156,7 @@ def main():
         print("  [PASS] source archive recorded, reopened by later steps, "
               "fingerprints differ")
         print("  [PASS] root / course/ / run-named layouts parse identically")
+        print("  [PASS] structure/archive mismatch refused, --allow-stale overrides")
     return not failures
 
 

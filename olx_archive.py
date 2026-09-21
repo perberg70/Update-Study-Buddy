@@ -190,6 +190,56 @@ def describe_source(structure):
         print("       extract_edx.py --tar <archive> to record one.")
 
 
+def open_for_structure(structure, explicit_tar=None, allow_stale=False):
+    """Open the archive a *structure* was parsed from, refusing a mismatch.
+
+    Anything that produces an artifact - a PDF, an mp3, a transcript - takes
+    its skeleton from course_structure.json and its content from the archive.
+    Nothing forces those to be the same export, and when they are not the
+    result is a document whose structure says one thing and whose text says
+    another, which is exactly the failure this project spent a session
+    chasing.
+
+    A warning is not enough: the last one printed correctly, above sixty lines
+    of transcription output, and was gone by the time it mattered. So this
+    raises, names the fix, and offers allow_stale for the operator who has
+    looked and decided.
+    """
+    source = (structure or {}).get("_source") or {}
+    recorded = source.get("sha256_head")
+
+    if not recorded and not allow_stale:
+        raise CourseArchiveError(
+            "course_structure.json records no source archive, so there is no way\n"
+            "  to tell whether it describes the archive about to be read. It was\n"
+            "  written before provenance was tracked.\n"
+            "  Fix:      python extract_edx.py --tar <archive>\n"
+            "  Override: --allow-stale (builds anyway, provenance unverified)")
+
+    archive = open_course_archive(explicit_tar)
+    if allow_stale:
+        return archive
+
+    current = archive.fingerprint()["sha256_head"]
+    if recorded == current:
+        # Say it once, here, on the path that actually proceeds - callers do
+        # not also call describe_source, or every run prints its source twice.
+        print(f"[OK] Course source: {os.path.basename(archive.tar_path)} "
+              f"(sha:{current}, structure and content agree)")
+        return archive
+
+    if recorded != current:
+        raise CourseArchiveError(
+            "course_structure.json was parsed from a different archive than the\n"
+            "  one being read. The document would take its structure from one\n"
+            "  export and its content from another.\n"
+            f"  structure came from: sha:{recorded} ({os.path.basename(source.get('tar', '?'))})\n"
+            f"  about to read:       sha:{current} ({os.path.basename(archive.tar_path)})\n"
+            "  Fix:      python extract_edx.py --tar "
+            f"{os.path.basename(archive.tar_path)}\n"
+            "  Override: --allow-stale (builds anyway, provenance unverified)")
+
+
 def open_course_archive(explicit_tar=None, structure_path=None):
     """Open the archive a run should read.
 

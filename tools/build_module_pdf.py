@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (COURSE_STRUCTURE_PATH,  # noqa: E402
                     ORGANIZED_CONTENT_DIR, TRANSCRIPTS_DIR)
 from olx_archive import (CourseArchiveError, describe_source,  # noqa: E402
-                         open_course_archive)
+                         open_for_structure)
 
 MODULE_NUMBER_RE = re.compile(r"^\s*(\d+)")
 NO_TRANSCRIPT = "[no transcript in export]"
@@ -581,6 +581,9 @@ def main() -> int:
     parser.add_argument("--tar", dest="tar_path",
                         help="course .tar.gz to read (default: the one "
                              "course_structure.json was built from)")
+    parser.add_argument("--allow-stale", action="store_true",
+                        help="build even when course_structure.json and the archive "
+                             "disagree about which export they came from")
     parser.add_argument("--include-hidden", action="store_true",
                         help="also include staff-only units and text hidden from "
                              "sighted users (both are skipped by default)")
@@ -592,10 +595,12 @@ def main() -> int:
     with open(COURSE_STRUCTURE_PATH, "r", encoding="utf-8") as fh:
         structure = json.load(fh)
     modules = group_modules(structure.get("chapters", []))
-    describe_source(structure)
 
     if args.list or not args.module:
-        print(f"{len(modules)} module(s):\n")
+        # This path never opens the archive, so it reports what the structure
+        # records rather than a verified match.
+        describe_source(structure)
+        print(f"\n{len(modules)} module(s):\n")
         for module in modules:
             chapters = ", ".join(c.get("title", "?") for c in module["chapters"])
             print(f"  {module_filename(module):24} {module_label(module)}")
@@ -616,7 +621,7 @@ def main() -> int:
     module = chosen[0]
 
     try:
-        archive = open_course_archive(args.tar_path)
+        archive = open_for_structure(structure, args.tar_path, args.allow_stale)
     except (CourseArchiveError, FileNotFoundError) as exc:
         print(f"[FAIL] {exc}")
         return 1
