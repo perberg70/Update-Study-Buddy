@@ -173,6 +173,24 @@ def save_audio_index(output_dir, index):
         print(f"[WARN] Could not write {AUDIO_INDEX_NAME}: {exc}")
 
 
+def record_audio(output_dir, index, key, url, archive_sha):
+    """Note that *key* was built from this url and export, and save immediately.
+
+    Written per video rather than once at the end. The index exists so an
+    interrupted run resumes, and an index held only in memory until the loop
+    finishes records nothing at all when the run is interrupted - which is the
+    only time resumability matters.
+    """
+    index[key] = {"url": url, "archive": archive_sha}
+    save_audio_index(output_dir, index)
+
+
+def forget_audio(output_dir, index, key):
+    """Drop an entry and save, so a failed rebuild leaves no stale claim."""
+    if index.pop(key, None) is not None:
+        save_audio_index(output_dir, index)
+
+
 def audio_is_current(index, key, url, archive_sha):
     """True when the mp3 on disk was built from this URL and this export."""
     entry = index.get(key)
@@ -278,14 +296,14 @@ def organize_course(archive, output_dir, structure=None):
                                         print(f"   [conv] {mp3_filename} ({human_size(written)})",
                                               flush=True)
                                         extract_audio(temp_mp4, mp3_path)
-                                        audio_index[index_key] = {
-                                            "url": vid_url, "archive": archive_sha}
+                                        record_audio(output_dir, audio_index,
+                                                     index_key, vid_url, archive_sha)
                                         chapter_manifest["files"].append(
                                             {"name": mp3_filename, "path": mp3_path, "type": "audio"})
                                     except Exception as exc:
                                         print(f"   [FAIL] {video_title[:46]}: {exc}")
                                         video_failures.append((video_title, str(exc)))
-                                        audio_index.pop(index_key, None)
+                                        forget_audio(output_dir, audio_index, index_key)
                                         if os.path.exists(mp3_path):
                                             # A partial mp3 would be reused as complete
                                             # by the skip check above.
@@ -324,6 +342,8 @@ def organize_course(archive, output_dir, structure=None):
         for name in assets:
             archive.extract_to(f"static/{name}", os.path.join(static_output, name))
 
+    # Entries are already saved as each mp3 is built; this final write is what
+    # records removals, when a video has gone from the course.
     save_audio_index(output_dir, audio_index)
 
     with open(MANIFEST_PATH, "w", encoding="utf-8") as f:

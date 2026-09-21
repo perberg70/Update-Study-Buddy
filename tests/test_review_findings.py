@@ -182,11 +182,73 @@ def test_audio_cache_invalidation(failures):
               "a corrupt index should read as empty, not raise")
 
 
+def test_audio_index_survives_interruption(failures):
+    """Each mp3 is recorded as it is built, not once the whole run finishes.
+
+    The index exists so an interrupted run resumes. Held in memory until the
+    loop ends, it records nothing at all when the run is interrupted - which
+    is the only time resumability matters.
+    """
+    with tempfile.TemporaryDirectory() as base:
+        live = {}
+        oc.record_audio(base, live, "01_Ch/A.mp3", "https://cdn/a.mp4", "sha-one")
+
+        # Nothing else has run: a separate reader must already see it.
+        on_disk = oc.load_audio_index(base)
+        check(failures, on_disk == {"01_Ch/A.mp3": {"url": "https://cdn/a.mp4",
+                                                    "archive": "sha-one"}},
+              f"one mp3 should be on disk immediately, got {on_disk}")
+
+        oc.record_audio(base, live, "01_Ch/B.mp3", "https://cdn/b.mp4", "sha-one")
+        check(failures, len(oc.load_audio_index(base)) == 2,
+              "the second should be there too, without waiting for the run to end")
+
+        # As if the run died here: a fresh process reuses both.
+        reloaded = oc.load_audio_index(base)
+        check(failures, oc.audio_is_current(reloaded, "01_Ch/A.mp3",
+                                            "https://cdn/a.mp4", "sha-one"),
+              "an interrupted run's work must be reusable next time")
+
+        # A failed rebuild must not leave a claim to an mp3 that was deleted.
+        oc.forget_audio(base, live, "01_Ch/A.mp3")
+        check(failures, "01_Ch/A.mp3" not in oc.load_audio_index(base),
+              "forget_audio should remove the entry from disk, not just memory")
+        check(failures, "01_Ch/B.mp3" in oc.load_audio_index(base),
+              "...and leave the others alone")
+        oc.forget_audio(base, live, "not-there.mp3")   # must not raise
+
+
+def test_fingerprint_memoised(failures):
+    """Hashing a few hundred MB should happen once per instance, not per call."""
+    with tempfile.TemporaryDirectory() as base:
+        path = make_archive(os.path.join(base, "course.m.tar.gz"), COURSE)
+        archive = CourseArchive(path)
+
+        first = archive.fingerprint()
+        second = archive.fingerprint()
+        check(failures, first == second,
+              "repeated calls must agree - read_at is a timestamp, so this only "
+              "holds if the result is cached")
+
+        # Mutating what a caller got back must not poison the cache.
+        second["sha256"] = "tampered"
+        check(failures, archive.fingerprint()["sha256"] == first["sha256"],
+              "fingerprint() should hand out a copy, not its own dict")
+
+        # A changed file is still caught, because that means a new instance.
+        with open(path, "ab") as fh:
+            fh.write(b"appended")
+        check(failures, CourseArchive(path).fingerprint()["sha256"] != first["sha256"],
+              "a new CourseArchive must hash afresh, or which_archive.py goes blind")
+
+
 def main():
     failures = []
     test_same_title_replace(failures)
     test_whole_archive_hash(failures)
     test_audio_cache_invalidation(failures)
+    test_audio_index_survives_interruption(failures)
+    test_fingerprint_memoised(failures)
 
     for msg in failures:
         print(f"  [FAIL] {msg}")
@@ -195,6 +257,8 @@ def main():
         print("  [PASS] whole-archive hash distinguishes a difference past 8 MiB,")
         print("         where the old partial hash provably collided")
         print("  [PASS] cached audio invalidated by a new export or a new url")
+        print("  [PASS] each mp3 recorded as built, so an interrupted run resumes")
+        print("  [PASS] fingerprint memoised per instance, fresh for a new one")
     return not failures
 
 

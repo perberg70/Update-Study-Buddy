@@ -47,6 +47,7 @@ class CourseArchive:
 
         self._sizes: dict[str, int] = {}
         self._cache: dict[str, bytes] = {}
+        self._fingerprint = None
         self.root = ""
 
         try:
@@ -164,13 +165,20 @@ class CourseArchive:
         export. Two exports differing only in later HTML, transcripts or media
         would have passed that check.
 
-        Reading a few hundred MB costs about a second, once per command.
+        Computed once per instance. The class already treats the archive as
+        immutable for its lifetime - it caches member contents at construction -
+        and a few hundred MB is worth hashing once rather than on every caller.
+        Detecting a file that changed on disk means constructing a new
+        CourseArchive, which is what tools/which_archive.py does.
         """
+        if self._fingerprint is not None:
+            return dict(self._fingerprint)
+
         digest = hashlib.sha256()
         with open(self.tar_path, "rb") as fh:
             for block in iter(lambda: fh.read(1024 * 1024), b""):
                 digest.update(block)
-        return {
+        self._fingerprint = {
             "tar": self.tar_path,
             "size_bytes": os.path.getsize(self.tar_path),
             "sha256": digest.hexdigest()[:16],
@@ -180,6 +188,7 @@ class CourseArchive:
             "files_in_archive": len(self._sizes),
             "course_root": self.root or "(archive root)",
         }
+        return dict(self._fingerprint)
 
     def __enter__(self):
         return self
