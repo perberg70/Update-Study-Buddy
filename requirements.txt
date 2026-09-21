@@ -5,3 +5,7 @@ playwright>=1.40
 # (Vera), so module PDFs render em-dashes and Swedish characters even where no
 # system font is available.
 reportlab>=4.0
+
+# Captions for the course's YouTube-hosted videos (tools/fetch_youtube_transcripts.py).
+# Optional: everything else works without it.
+youtube-transcript-api>=1.0

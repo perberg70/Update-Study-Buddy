@@ -52,15 +52,32 @@ def parse_duration(video_root):
 
 
 def youtube_id(video_root):
+    """YouTube id from a <video> element, or ''.
+
+    The `youtube` attribute can list several playback speeds,
+    "0.75:abc,1.00:def,1.25:ghi", so the 1.00 entry is preferred rather than
+    whatever happens to be last.
+    """
     for attr in YOUTUBE_ATTRS:
         value = (video_root.get(attr) or "").strip()
-        if value:
-            # "1.00:abcdefg" style values carry the id after the colon.
-            return value.split(":")[-1]
+        if not value:
+            continue
+        pairs = [p.strip() for p in value.split(",") if p.strip()]
+        for pair in pairs:
+            if ":" in pair:
+                speed, vid = pair.split(":", 1)
+                if speed.strip().startswith("1.0") or speed.strip() == "1":
+                    return vid.strip()
+        first = pairs[0] if pairs else value
+        return first.split(":", 1)[-1].strip() if ":" in first else first
+
     for asset in video_root.findall(".//encoded_video"):
         url = asset.get("url") or ""
         if "youtu" in url:
-            return url.rsplit("/", 1)[-1].split("?")[-1]
+            tail = url.split("?", 1)
+            if len(tail) > 1 and "v=" in tail[1]:
+                return tail[1].split("v=", 1)[1].split("&")[0]
+            return tail[0].rsplit("/", 1)[-1]
     return ""
 
 
