@@ -4,6 +4,8 @@ Usage:
     python compare_sources.py            # Generate comparison_review.json
     python compare_sources.py --apply    # Apply reviewed plan (delete + upload)
 """
+import argparse
+import datetime
 import json
 import os
 import re
@@ -465,8 +467,31 @@ def apply_review():
     print("\n--- Apply complete. ---")
 
 
+def parse_args(argv=None):
+    """Parse the flags. Unknown ones are an error, deliberately.
+
+    This used to be `"--apply" in sys.argv`, so `--aply` fell through to
+    generate_review() and overwrote comparison_review.json - the one file a
+    human edits by hand - without a word.
+    """
+    parser = argparse.ArgumentParser(
+        description="Compare course content with the notebook's current sources.",
+        epilog="With no arguments, writes comparison_review.json for you to review. "
+               "With --apply, executes the reviewed plan.")
+    parser.add_argument("--apply", action="store_true",
+                        help="execute the reviewed plan: upload, then delete")
+    return parser.parse_args(argv)
+
+
 if __name__ == "__main__":
-    if "--apply" in sys.argv:
+    args = parse_args()
+    if args.apply:
         apply_review()
     else:
+        # This file is hand-edited, and regenerating it discards those edits.
+        if os.path.exists(REVIEW_PATH):
+            stamp = datetime.datetime.fromtimestamp(
+                os.path.getmtime(REVIEW_PATH)).strftime("%Y-%m-%d %H:%M")
+            print(f"[WARN] Replacing {REVIEW_PATH}, last written {stamp}.")
+            print("       Any actions edited by hand in it are discarded.")
         generate_review()

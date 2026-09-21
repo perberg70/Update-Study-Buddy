@@ -159,6 +159,7 @@ python run_full_update.py
 - `python organize_content.py` — build organized content and the manifest.
 - `python upload_agent.py` — upload per `comparison_review.json` (or the full manifest).
 - `python delete_agent.py --dry-run` — preview exactly which names are delete targets.
+  Every run announces its mode first: `[MODE] dry run` or `[MODE] LIVE`.
 - `python delete_agent.py` — delete per `comparison_review.json`. **Exact titles only.**
 - `python delete_agent.py --fuzzy` — match on shared words instead. **Unsafe:** on a real
   144-source notebook this made 78% of titles match some *other* source, because
@@ -436,6 +437,23 @@ unattended run:
 - A failure is reported per video, the rest continue, and the exit code is non-zero with a
   summary of what to re-run.
 
+### A misspelled flag cannot disarm a safety
+
+Every script parses with `argparse` and **rejects** anything it does not recognise. That
+sounds like housekeeping; it was not. These flags were read by substring-testing
+`sys.argv`, so a typo silently changed behaviour — and the danger was one-directional:
+
+| flag | typo'd | was |
+|---|---|---|
+| `delete_agent.py --dry-run` | `--dryrun` | **a real deletion**, unundoable |
+| `compare_sources.py --apply` | `--aply` | **the hand-edited review file overwritten** |
+| `--fuzzy` | `--fuzy` | exact matching — harmless |
+| `--confirm-unsafe-dedupe` | any typo | a refusal — harmless |
+
+`delete_agent.py` also announces its mode on the first line, so the state a typo used to
+flip is now stated rather than assumed. And `compare_sources.py` says so before replacing
+an existing `comparison_review.json`, since that file holds your edits.
+
 ### Safety behaviour
 
 - **Deletion matches titles exactly** and is bounded by the number of copies actually
@@ -470,4 +488,7 @@ unattended run:
 - **Large files skipped** — Check `MAX_UPLOAD_SIZE_MB` / `ENFORCE_UPLOAD_SIZE_LIMIT` in `config.py` (or env vars).
 - **Duplicates remain after delete** — run `python delete_agent.py --dry-run` first and confirm the planned names. The matcher requires an **exact** normalised title by default; if a name misses, copy the exact source title from the notebook into `comparison_review.json`. `--fuzzy` exists but is unsafe (see the command reference).
 - **The module PDF is not where I expected** — `Organized_Course_Content/Module_<n>.pdf`, or wherever `--out-dir` points.
+- **A flag seems to be ignored** — it is not; every script rejects unrecognised flags and
+  exits 2. `python <script>.py --help` lists what it accepts. This used to be silent, and
+  `delete_agent.py --dryrun` therefore deleted for real.
 - **Pre-merge check** — run `python tools/check_conflict_markers.py` before commit/PR to ensure no `<<<<<<<`, `=======`, `>>>>>>>` markers remain.

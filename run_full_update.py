@@ -1,3 +1,4 @@
+import argparse
 import subprocess
 import sys
 
@@ -73,7 +74,14 @@ def main():
     print("\n--- UPDATE COMPLETE! Check the notebook for results. ---")
     return True
 
+def parse_args(argv=None):
+    """No options. The parser rejects unknown flags instead of ignoring them."""
+    parser = argparse.ArgumentParser(description="Run the whole notebook update, pausing for you to review the plan.", epilog="Needs Chrome started with --remote-debugging-port=9222 and signed in.")
+    return parser.parse_args(argv)
+
+
 if __name__ == "__main__":
+    parse_args()
     # Exit non-zero on failure: export_current_sources.py now reports a failed
     # scrape properly, so the orchestrator must not claim success over it.
     raise SystemExit(0 if main() else 1)

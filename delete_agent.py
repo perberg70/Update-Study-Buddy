@@ -4,7 +4,13 @@ Remove sources from NotebookLM.
 Modes:
 - Default: remove sources from comparison_review.json (REPLACE / DELETE actions).
 - --dedupe-current: remove duplicate copies from current_sources.json, keeping one copy per source.
+
+Usage:
+    python delete_agent.py --dry-run
+    python delete_agent.py
+    python delete_agent.py --dedupe-current --dry-run
 """
+import argparse
 import json
 import os
 import re
@@ -513,20 +519,47 @@ def run_dedupe_current_sources(dry_run: bool = False, fuzzy: bool = False,
     return 0
 
 
-if __name__ == "__main__":
-    dry_run = "--dry-run" in sys.argv
-    dedupe_current = "--dedupe-current" in sys.argv
-    fuzzy = "--fuzzy" in sys.argv
+def parse_args(argv=None):
+    """Parse the flags. Unknown ones are an error, deliberately.
 
-    if fuzzy:
+    This used to be `"--dry-run" in sys.argv`, which meant `--dryrun` silently
+    disarmed the safety and deleted for real. A misspelled flag that engages a
+    safety is harmless; one that disables a safety is not, and NotebookLM
+    deletion cannot be undone. argparse rejects anything it does not recognise
+    before a browser is opened or a plan is read.
+    """
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--dry-run", action="store_true",
+                        help="print the plan and delete nothing")
+    parser.add_argument("--dedupe-current", action="store_true",
+                        help="operate on repeated titles in current_sources.json "
+                             "instead of the review file (refuses without "
+                             "--confirm-unsafe-dedupe)")
+    parser.add_argument("--fuzzy", action="store_true",
+                        help="match on shared words instead of exact titles. Unsafe")
+    parser.add_argument("--confirm-unsafe-dedupe", action="store_true",
+                        help="having checked the content yourself, allow "
+                             "--dedupe-current to delete")
+    return parser.parse_args(argv)
+
+
+if __name__ == "__main__":
+    args = parse_args()
+
+    # The mode a typo used to flip silently is now the first thing printed.
+    print("[MODE] dry run - nothing will be deleted" if args.dry_run
+          else "[MODE] LIVE - sources will be deleted from the notebook")
+
+    if args.fuzzy:
         print("[WARN] --fuzzy matches on shared words, so distinct sources can be")
         print("       treated as copies of each other. Run with --dry-run first.")
 
-    if dedupe_current:
+    if args.dedupe_current:
         code = run_dedupe_current_sources(
-            dry_run=dry_run, fuzzy=fuzzy,
-            confirmed="--confirm-unsafe-dedupe" in sys.argv,
+            dry_run=args.dry_run, fuzzy=args.fuzzy,
+            confirmed=args.confirm_unsafe_dedupe,
         )
     else:
-        code = run_delete(dry_run=dry_run, fuzzy=fuzzy)
+        code = run_delete(dry_run=args.dry_run, fuzzy=args.fuzzy)
     raise SystemExit(code)

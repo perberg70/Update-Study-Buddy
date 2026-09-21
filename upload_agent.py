@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import re
@@ -216,5 +217,12 @@ def run_upload() -> int:
     return 1 if failed else 0
 
 
+def parse_args(argv=None):
+    """No options. The parser rejects unknown flags instead of ignoring them."""
+    parser = argparse.ArgumentParser(description="Upload sources to the notebook per comparison_review.json.", epilog="Falls back to the full processing_manifest.json when no review file exists.")
+    return parser.parse_args(argv)
+
+
 if __name__ == "__main__":
+    parse_args()
     raise SystemExit(run_upload())

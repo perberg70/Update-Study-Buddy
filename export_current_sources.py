@@ -9,6 +9,7 @@ the compare step to treat existing sources as missing, and the delete step to
 treat unrelated sources as duplicates.
 """
 
+import argparse
 import json
 import re
 import sys
@@ -197,5 +198,12 @@ def run_export() -> int:
     return 0
 
 
+def parse_args(argv=None):
+    """No options. The parser rejects unknown flags instead of ignoring them."""
+    parser = argparse.ArgumentParser(description="Scrape the notebook's Sources panel into current_sources.json.", epilog="Needs Chrome started with --remote-debugging-port=9222 and signed in.")
+    return parser.parse_args(argv)
+
+
 if __name__ == "__main__":
+    parse_args()
     raise SystemExit(run_export())

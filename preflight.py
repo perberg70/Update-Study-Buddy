@@ -4,6 +4,7 @@ Usage:
     python preflight.py
 """
 
+import argparse
 import os
 import shutil
 import socket
@@ -204,5 +205,12 @@ def main() -> int:
     return 1
 
 
+def parse_args(argv=None):
+    """No options. The parser rejects unknown flags instead of ignoring them."""
+    parser = argparse.ArgumentParser(description="Check the environment before a run: code, packages, ffmpeg, export.", epilog="Reports optional packages as warnings; they gate nothing.")
+    return parser.parse_args(argv)
+
+
 if __name__ == "__main__":
+    parse_args()
     raise SystemExit(main())
