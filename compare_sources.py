@@ -41,6 +41,15 @@ MIN_SUFFIX_WORDS = 3
 # the nearest unrelated pair scored 0.22.
 CROSS_REF_FLOOR = 0.25
 
+# Chapters get renumbered between course runs: 04_What_AI_is... becomes
+# 07_What_AI_is.... The filename body is unchanged, only the leading number
+# moved, so the suffix rule misses it. Matching on the body requires it to be
+# *exactly* equal - not merely similar - which is why this cannot pair two
+# genuinely different chapters that happen to share vocabulary.
+CHAPTER_NUMBER_RE = re.compile(r"^\d+[\s_.\-]*")
+MIN_RENUMBER_CHARS = 10
+MIN_RENUMBER_WORDS = 2
+
 
 def load_current_sources():
     if not os.path.exists(CURRENT_SOURCES_FILE):
@@ -100,6 +109,30 @@ def is_title_suffix(new_name, old_name):
     return nb.endswith(" " + na)
 
 
+def strip_chapter_number(name):
+    """Drop a leading chapter number: '07_What_AI_is' -> 'What_AI_is'.
+
+    Deliberately does not consume a trailing letter, so '03B_Track_Academia'
+    and '05_B_Track_Academia' both reduce to the same body.
+    """
+    return CHAPTER_NUMBER_RE.sub("", (name or "").strip())
+
+
+def is_renumbered_match(new_name, old_name):
+    """True when the names differ only by a leading chapter number.
+
+    Compares against the last ' - ' segment of the old title, which is the
+    filename portion of a chapter-prefixed source.
+    """
+    body = normalize(strip_chapter_number(new_name))
+    if len(body) < MIN_RENUMBER_CHARS:
+        return False
+    if len(significant_words(body)) < MIN_RENUMBER_WORDS:
+        return False
+    tail = (old_name or "").rsplit(" - ", 1)[-1]
+    return body == normalize(strip_chapter_number(tail))
+
+
 def name_similarity(a, b):
     na, nb = normalize(a), normalize(b)
     if not na or not nb:
@@ -154,9 +187,11 @@ def compute_match_score(new_file, old_name):
     # similarity alone could pair names with no words in common.
     score = sim * 0.5 + w_overlap * 0.3 + ch_overlap * 0.05 + content_boost
 
-    # Unlike the removed max(weighted, sim), this is not a general similarity
-    # escape hatch: it fires only when the existing title is exactly this
-    # filename plus a prefix.
+    # Unlike the removed max(weighted, sim), neither of these is a general
+    # similarity escape hatch: each fires only on an exact structural relation.
+    if is_renumbered_match(new_name, old_name):
+        score = max(score, SUFFIX_MATCH_SCORE + ch_overlap * 0.05)
+
     if is_title_suffix(new_name, old_name):
         # Keep the chapter signal on top rather than flattening to a constant:
         # the same video can appear in two chapters ("3A Track ..." and
@@ -174,6 +209,8 @@ def match_reason(new_name, old_name, score):
         return "exact name match"
     if is_title_suffix(new_name, old_name):
         return "filename matches title suffix (chapter prefix)"
+    if is_renumbered_match(new_name, old_name):
+        return "same filename, chapter renumbered"
     if na in nb or nb in na:
         return "name containment"
     if score >= 0.6:
