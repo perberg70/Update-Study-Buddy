@@ -1,0 +1,54 @@
+name: tests
+
+# The PR is the point: this must run before anything merges. Pushes to main are
+# covered too, so a direct commit there cannot skip it. Deliberately not every
+# branch push - that would double up on every PR for no extra signal.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A new push supersedes the run in flight for the same ref.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      # Run every version even after one fails: knowing it is 3.9-only is worth
+      # more than stopping at the first red.
+      fail-fast: false
+      matrix:
+        # 3.9 is the minimum the README claims; 3.13 is the newest. All five of
+        # 3.9-3.13 were run against this suite before this workflow was added,
+        # so the matrix reflects what was measured, not what was hoped.
+        python-version: ["3.9", "3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # Two pure-Python packages, installing in seconds: reportlab writes the
+      # module PDFs, pypdf reads the course documents out of static/. Both are
+      # exercised by the suite. playwright would pull a browser, and
+      # faster-whisper pulls ctranslate2 and a model runtime - neither is
+      # reachable from the tests, which stub the browser and skip transcription
+      # when no backend is there.
+      - name: Install the packages the tests exercise
+        run: |
+          python -m pip install --upgrade pip
+          pip install reportlab pypdf
+
+      - name: Every module imports and compiles
+        run: python -m compileall -q . -x '(^|/)(\.git|__pycache__|course_exports)(/|$)'
+
+      - name: Tests
+        run: python tests/run_all.py
+
+      - name: No conflict markers
+        run: python tools/check_conflict_markers.py

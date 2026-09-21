@@ -1,3 +1,4 @@
+import argparse
 import subprocess
 import sys
 
@@ -16,19 +17,24 @@ def main():
     print("  Study Buddy - Full Course Update")
     print("=" * 60)
 
-    # ── Phase 1: Export + duplicate cleanup + compare inputs ────
+    # ── Phase 1: Export + compare inputs ────────────────────────
+    #
+    # delete_agent.py --dedupe-current used to run here, before the review gate.
+    # It is deliberately no longer automatic: it sweeps the whole notebook with no
+    # human confirmation, and duplicates were themselves caused by a broken export
+    # (compare then sees no existing sources and re-uploads everything). With the
+    # export fixed, uploads stop duplicating and the sweep is not needed.
+    # To deduplicate, run it explicitly and review the plan first:
+    #     python delete_agent.py --dedupe-current --dry-run
+    #     python delete_agent.py --dedupe-current
     if not run_script("export_current_sources.py"):
-        return
-    if not run_script("delete_agent.py", ["--dedupe-current"]):
-        return
-    if not run_script("export_current_sources.py"):
-        return
+        return False
     if not run_script("extract_edx.py"):
-        return
+        return False
     if not run_script("organize_content.py"):
-        return
+        return False
     if not run_script("compare_sources.py"):
-        return
+        return False
 
     # ── Review pause ────────────────────────────────────────────
     print()
@@ -46,17 +52,36 @@ def main():
     print("  Save the file when done, then press Enter here.")
     print("=" * 60)
 
+    # Show what will actually be deleted. Pressing Enter on an unseen plan is how
+    # a wrong match becomes a permanent deletion.
+    print()
+    print("--- Sources that WILL BE DELETED under the current review file ---")
+    subprocess.run([sys.executable, "delete_agent.py", "--dry-run"], check=False)
+    print("-" * 60)
+    print("  If anything above should not be deleted, edit comparison_review.json")
+    print("  now and set that row to KEEP, then press Enter.")
+
     try:
         input("\n>>> Press Enter to apply the reviewed plan (Ctrl+C to abort)... ")
     except KeyboardInterrupt:
         print("\nAborted.")
-        return
+        return False
 
     # ── Phase 2: Apply (delete old + upload new) ────────────────
     if not run_script("compare_sources.py", ["--apply"]):
-        return
+        return False
 
-    print("\n--- UPDATE COMPLETE! Check NotebookLM for results. ---")
+    print("\n--- UPDATE COMPLETE! Check the notebook for results. ---")
+    return True
+
+def parse_args(argv=None):
+    """No options. The parser rejects unknown flags instead of ignoring them."""
+    parser = argparse.ArgumentParser(description="Run the whole notebook update, pausing for you to review the plan.", epilog="Needs Chrome started with --remote-debugging-port=9222 and signed in.")
+    return parser.parse_args(argv)
+
 
 if __name__ == "__main__":
-    main()
+    parse_args()
+    # Exit non-zero on failure: export_current_sources.py now reports a failed
+    # scrape properly, so the orchestrator must not claim success over it.
+    raise SystemExit(0 if main() else 1)

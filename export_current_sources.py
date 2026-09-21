@@ -1,215 +1,209 @@
+"""Export the current list of source names from the notebook to current_sources.json.
+
+Requires Chrome started with --remote-debugging-port=9222 and signed in to the
+account that owns the notebook.
+
+This file is the single source of truth for "what is currently in the notebook",
+so it must never write a result it cannot vouch for: a wrong answer here causes
+the compare step to treat existing sources as missing, and the delete step to
+treat unrelated sources as duplicates.
 """
-Export the current list of source names from the NotebookLM notebook to current_sources.json.
-Run with Chrome open: chrome.exe --remote-debugging-port=9222, and the notebook open (or we navigate to it).
-This keeps current_sources.json up to date so compare_sources.py can use it.
-"""
+
+import argparse
 import json
-import os
 import re
 import sys
-from playwright.sync_api import sync_playwright
 
-from config import CDP_URL, CURRENT_SOURCES_FILE, PROJECT_URL
+from config import CURRENT_SOURCES_FILE, PROJECT_URL
+from notebooklm_client import BrowserConnectionError, connect, describe_page
+
+DEBUG_PATH = "export_sources_debug.json"
+
+PANEL_READY = re.compile(r"(\+\s*)?Add\s+sources?|Lägg\s+till\s+källa", re.I)
+
+# Material icon ligatures and chrome that render as text inside the panel.
+NOT_A_SOURCE = {
+    "add", "add source", "add sources", "sources", "källor", "lägg till källa",
+    "select all", "välj alla källor", "web", "fast research", "search",
+    "search spark", "label auto", "sort", "language", "keyboard arrow down",
+    "drop files here", "markdown", "description", "video audio call",
+    "video youtube", "drive pdf", "more vert", "attach file", "dock to right",
+}
+
+# One entry per source row. aria-description carries the full untruncated title;
+# .source-title-column is captured too so a disagreement is visible rather than silent.
+SCRAPE_JS = """() => {
+    const rowSelectors = [
+        'div.single-source-container',   // Gemini Notebook (current)
+        '[role="listitem"]',             // legacy NotebookLM
+        'mat-list-item, .mat-mdc-list-item',
+    ];
+
+    let rows = [];
+    let usedSelector = null;
+    for (const sel of rowSelectors) {
+        const found = document.querySelectorAll(sel);
+        if (found.length) { rows = Array.from(found); usedSelector = sel; break; }
+    }
+
+    const clean = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+
+    const entries = rows.map(row => {
+        const btn = row.querySelector('button[aria-description]');
+        const col = row.querySelector('.source-title-column');
+        return {
+            aria: clean(btn ? btn.getAttribute('aria-description') : ''),
+            title: clean(col ? (col.innerText || col.textContent) : ''),
+            rowText: clean(row.innerText || row.textContent).slice(0, 200),
+        };
+    });
+
+    return {
+        usedSelector,
+        rowCount: rows.length,
+        entries,
+        checkboxes: document.querySelectorAll('input[type="checkbox"], [role="checkbox"]').length,
+        ariaButtons: document.querySelectorAll('button[aria-description]').length,
+    };
+}"""
 
 
-def run_export():
-    print("--- Exporting current NotebookLM sources to", CURRENT_SOURCES_FILE, "---")
+def is_source_name(name: str) -> bool:
+    """Reject UI labels, icon ligatures and empty strings."""
+    if not name or len(name.strip()) < 2:
+        return False
+    flat = re.sub(r"[^a-z0-9åäö]+", " ", name.lower()).strip()
+    if flat in NOT_A_SOURCE:
+        return False
+    # "add Add sources" - icon ligature glued to its own button label.
+    if re.fullmatch(r"(add\s+)?add\s+sources?", flat):
+        return False
+    if re.fullmatch(r"[\d\s.]+", name.strip()):
+        return False
+    return True
+
+
+def write_debug(report: dict, reason: str) -> None:
+    report = dict(report, _reason=reason)
+    with open(DEBUG_PATH, "w", encoding="utf-8") as fh:
+        json.dump(report, fh, indent=2, ensure_ascii=False)
+    print(f"[DEBUG] Wrote {DEBUG_PATH} - send this file to diagnose the selectors.")
+
+
+def run_export() -> int:
+    print(f"--- Exporting current sources to {CURRENT_SOURCES_FILE} ---")
+
+    # Imported here, not at module scope, so the pure helpers above stay testable
+    # without a browser stack installed.
+    from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
         try:
-            browser = p.chromium.connect_over_cdp(CDP_URL)
-            context = browser.contexts[0]
-            page = context.pages[0]
-            print("[OK] Connected via CDP.")
-        except Exception as e:
-            print(f"[FAIL] CDP connection failed: {e}")
-            print("Start Chrome with:  & \"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\" --remote-debugging-port=9222")
-            sys.exit(1)
+            browser, page = connect(p)
+            print(f"[OK] Connected via CDP. Starting from tab: {describe_page(page)}")
+        except BrowserConnectionError as exc:
+            print(f"[FAIL] {exc}")
+            return 1
 
         page.goto(PROJECT_URL, wait_until="domcontentloaded")
         page.wait_for_load_state("load")
+        print(f"[OK] Scraping: {describe_page(page)}")
 
-        page.get_by_role("button", name=re.compile(r"(\+\s*)?Add\s+source|Lägg\s+till\s+källa", re.I)).first.wait_for(
-            state="visible", timeout=30_000
-        )
-        page.wait_for_timeout(2000)
+        # A modal overlay hides the sources panel; dismiss before reading.
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(400)
 
-        # Scroll the Sources panel so all items are in DOM (virtual list)
         try:
-            panel = page.locator('section, [role="region"], [class*="sidebar"], [class*="source"]').filter(has=page.get_by_text(re.compile(r"Add\s+source|Sources|Källor", re.I))).first
-            for _ in range(8):
-                panel.evaluate("el => el.scrollBy(0, 350)")
-                page.wait_for_timeout(250)
-        except Exception:
-            pass
+            page.get_by_role("button", name=PANEL_READY).first.wait_for(
+                state="visible", timeout=30_000
+            )
+        except Exception as exc:
+            print(f"[FAIL] Sources panel never appeared: {exc}")
+            return 1
+        page.wait_for_timeout(2500)
 
-        # Icon/UI labels to exclude (Material icons, controls) – not real source names
-        IGNORE_TOKENS = {
-            "description", "more_vert", "drive_pdf", "video_audio_call", "video_youtube",
-            "more", "mer", "add", "lägg", "sources", "källor", "insert_drive_file",
-            "link", "content_copy", "upload", "folder", "image", "article",
-            "keyboard_arrow_down", "expand_more", "expand_less", "arrow_drop_down",
-        }
-        # Full phrases / UI labels that must not appear as source names (exact or contained)
-        UI_PHRASES_EXCLUDE = {
-            "select all sources", "keyboard arrow down", "keyboard_arrow_down",
-            "välj alla källor", "video_audio_call", "video_youtube", "drive_pdf",
-        }
+        report = page.evaluate(SCRAPE_JS)
 
-        # Scrape only from the Sources panel: find list items and get the actual source title (aria-labelledby or main text minus icons)
-        sources = page.evaluate("""(ignoreTokens) => {
-            const ignore = new Set((ignoreTokens || []).map(s => s.toLowerCase()));
-            const out = [];
-            // Find the Sources section: region that contains "Add source" / "Sources" and has the source list
-            const addBtn = Array.from(document.querySelectorAll('button, [role="button"]')).find(b => /add\\s+source|sources|källor|lägg\\s+till/i.test(b.textContent || b.getAttribute('aria-label') || ''));
-            const sourcesPanel = addBtn ? addBtn.closest('section, [role="region"], aside, nav, [class*="sidebar"], [class*="panel"], [class*="source"]') || document : document;
+    if not report["rowCount"]:
+        print("[FAIL] Found 0 source rows. The page structure has changed.")
+        write_debug(report, "no rows matched any known row selector")
+        return 1
 
-            const listItems = sourcesPanel.querySelectorAll('[role="listitem"]');
-            listItems.forEach(li => {
-                let name = '';
-                const labelledId = li.getAttribute('aria-labelledby');
-                if (labelledId) {
-                    const labelEl = document.getElementById(labelledId);
-                    if (labelEl) name = (labelEl.textContent || '').trim();
-                }
-                if (!name) {
-                    const full = (li.innerText || li.textContent || '').trim();
-                    const parts = full.split(/\\s+/).filter(p => p.length > 0 && !ignore.has(p.toLowerCase()) && !/^\\d+$/.test(p));
-                    name = parts.join(' ').trim();
-                }
-                if (name && name.length > 1 && !ignore.has(name.toLowerCase())) out.push(name);
-            });
+    print(f"[OK] Matched {report['rowCount']} row(s) via '{report['usedSelector']}'")
 
-            if (out.length) return [...new Set(out)];
+    sources, mismatches, rejected = [], [], []
+    for entry in report["entries"]:
+        name = entry["aria"] or entry["title"] or entry["rowText"]
+        if entry["aria"] and entry["title"] and entry["aria"] != entry["title"]:
+            mismatches.append((entry["aria"], entry["title"]))
+        if is_source_name(name):
+            sources.append(name.strip())
+        elif name:
+            rejected.append(name)
 
-            // Fallback 1: rows that contain a More/menu button – the row text is the source name
-            const withMenu = sourcesPanel.querySelectorAll('[aria-label*="More"], [aria-label*="Mer"], button[aria-label], [class*="more"]');
-            const seen = new Set();
-            withMenu.forEach(btn => {
-                const row = btn.closest('[role="listitem"], li, [class*="row"], [class*="item"], [class*="source"], [class*="mat-list"]');
-                if (!row) return;
-                const key = row.getBoundingClientRect?.()?.top + row.innerText?.slice(0,50) || row;
-                if (seen.has(key)) return;
-                seen.add(key);
-                let full = (row.innerText || row.textContent || '').trim();
-                full = full.replace(/more_vert|description|drive_pdf|video_youtube|video_audio_call|More|Mer/gi, '').replace(/\\s+/g, ' ').trim();
-                const parts = full.split(' ').filter(p => p.length > 0 && !ignore.has(p.toLowerCase()) && !/^\\d+$/.test(p));
-                const name = parts.join(' ').trim();
-                if (name.length > 3) out.push(name);
-            });
-            if (out.length) return [...new Set(out)];
+    extracted = len(sources)
 
-            // Fallback 2: any labelled spans/divs in the panel that look like titles (longer text, not buttons)
-            const allLabels = sourcesPanel.querySelectorAll('[id][id*="label"], [aria-label], [class*="title"], [class*="name"]');
-            allLabels.forEach(el => {
-                const t = (el.textContent || el.getAttribute('aria-label') || '').trim();
-                if (t.length > 4 && !ignore.has(t.toLowerCase()) && !/^\\d+$/.test(t)) out.push(t);
-            });
-            return [...new Set(out)];
-        }""", IGNORE_TOKENS)
+    seen, unique, duplicates = set(), [], {}
+    for name in sources:
+        key = name.lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(name)
+        else:
+            duplicates[name] = duplicates.get(name, 1) + 1
+    sources = unique
 
-        if not sources or not isinstance(sources, list):
-            sources = []
+    if rejected:
+        print(f"[INFO] Ignored {len(rejected)} non-source label(s), e.g. {rejected[:3]}")
 
-        # Filter: must look like a real source name (not just an icon word or UI phrase)
-        def is_likely_source_name(s):
-            if not s or len(s) < 2:
-                return False
-            s_lower = s.lower()
-            if s_lower in IGNORE_TOKENS:
-                return False
-            if any(phrase in s_lower for phrase in UI_PHRASES_EXCLUDE):
-                return False
-            if re.match(r"^[\d\s]+$", s):
-                return False
-            return True
+    # Dropping duplicates is intentional, but never silently: the difference between
+    # "the notebook has duplicate copies" and "extraction lost rows" matters.
+    if duplicates:
+        extra = extracted - len(sources)
+        print(f"[INFO] {report['rowCount']} row(s) -> {len(sources)} unique title(s).")
+        print(f"       {extra} duplicate copy/copies across {len(duplicates)} title(s):")
+        for name, count in sorted(duplicates.items(), key=lambda kv: -kv[1])[:10]:
+            print(f"         x{count}  {name[:66]}")
+        if len(duplicates) > 10:
+            print(f"         ... and {len(duplicates) - 10} more")
+        print("       Review with: python delete_agent.py --dedupe-current --dry-run")
+    if mismatches:
+        print(f"[WARN] {len(mismatches)} row(s) where aria-description and the visible")
+        print(f"       title differ. Using aria-description. First: {mismatches[0]}")
 
-        sources = [s.strip() for s in sources if isinstance(s, str) and is_likely_source_name(s.strip())]
-        sources = list(dict.fromkeys(sources))
+    # A scrape that finds rows but no usable names is a failure, not an empty notebook.
+    if not sources:
+        print(f"[FAIL] {report['rowCount']} row(s) found but no usable source names.")
+        write_debug(report, "rows matched but every name was rejected")
+        return 1
 
-        # Python fallback 1: listitem text
-        if not sources or all(len(s) < 5 for s in sources):
-            try:
-                items = page.locator('[role="listitem"]')
-                n = items.count()
-                for i in range(n):
-                    el = items.nth(i)
-                    t = el.inner_text(timeout=1000).strip()
-                    for token in IGNORE_TOKENS:
-                        t = re.sub(re.escape(token), "", t, flags=re.I)
-                    t = re.sub(r"\s+", " ", t).strip()
-                    if is_likely_source_name(t) and len(t) > 3:
-                        sources.append(t)
-                sources = list(dict.fromkeys(sources))
-            except Exception:
-                pass
+    # Completeness check runs on the pre-dedup count: every row must yield a name.
+    # Comparing unique names here would mask lost rows as if they were duplicates.
+    if extracted < report["rowCount"]:
+        print(f"[FAIL] {report['rowCount']} row(s) but only {extracted} name(s) extracted.")
+        write_debug(report, f"lost rows: {report['rowCount']} rows vs {extracted} names")
+        return 1
 
-        # Python fallback 2: get ALL visible text from the Sources panel (via JS from Add source button) and parse lines
-        if not sources or all(len(s) < 5 for s in sources):
-            try:
-                full_text = page.evaluate("""() => {
-                    const btn = Array.from(document.querySelectorAll('button, [role="button"]')).find(b => /add\\s+source|sources|källor|lägg/i.test(b.textContent || b.getAttribute('aria-label') || ''));
-                    if (!btn) return '';
-                    const panel = btn.closest('section') || btn.closest('aside') || btn.closest('[class*="sidebar"]') || btn.closest('[class*="panel"]') || btn.closest('nav') || btn.parentElement?.parentElement?.parentElement;
-                    return panel ? panel.innerText : '';
-                }""")
-                if full_text and isinstance(full_text, str):
-                    ui_phrases = {"add source", "add sources", "sources", "källor", "lägg till källa", "upload files", "websites", "drive", "copied text", "ladda upp", "webbplatser", "more", "mer", "select all sources", "keyboard arrow down", "välj alla källor"}
-                    for line in full_text.splitlines():
-                        line = line.strip()
-                        if not line or len(line) < 3:
-                            continue
-                        if line.lower() in ui_phrases:
-                            continue
-                        if re.match(r"^[\d\s\.]+$", line):
-                            continue
-                        if any(icon in line.lower() for icon in ("more_vert", "description", "drive_pdf", "video_youtube")):
-                            continue
-                        if re.search(r"\.(pdf|mp3|txt|docx|md|wav|m4a)(\s|$)", line, re.I) or line.startswith("http") or len(line) > 15:
-                            sources.append(line)
-                    sources = list(dict.fromkeys(sources))
-            except Exception:
-                pass
+    expected = max(report["checkboxes"] - 1, 0)
+    if expected and abs(extracted - expected) > 2:
+        print(f"[FAIL] Extracted {extracted} name(s) but {expected} checkbox(es) suggest")
+        print(f"       {expected}. Refusing to write a source list that may be incomplete.")
+        write_debug(report, f"count mismatch: {extracted} names vs {expected} checkboxes")
+        return 1
 
-        # Python fallback 3: same but with Playwright locator for panel
-        if not sources or all(len(s) < 5 for s in sources):
-            try:
-                add_btn = page.get_by_role("button", name=re.compile(r"(\+\s*)?Add\s+source|Lägg\s+till\s+källa", re.I)).first
-                panel = page.locator("section, [role='region'], aside, nav").filter(has=add_btn).first
-                full_text = panel.inner_text(timeout=5000)
-                ui_phrases = {"add source", "add sources", "sources", "källor", "lägg till källa", "upload files", "websites", "drive", "copied text", "ladda upp", "webbplatser", "more", "mer", "select all sources", "keyboard arrow down", "välj alla källor"}
-                for line in full_text.splitlines():
-                    line = line.strip()
-                    if not line or len(line) < 3 or line.lower() in ui_phrases:
-                        continue
-                    if re.match(r"^[\d\s\.]+$", line) or any(icon in line.lower() for icon in ("more_vert", "description", "drive_pdf", "video_youtube")):
-                        continue
-                    if re.search(r"\.(pdf|mp3|txt|docx|md|wav|m4a)(\s|$)", line, re.I) or line.startswith("http") or len(line) > 10:
-                        sources.append(line)
-                sources = list(dict.fromkeys(sources))
-            except Exception:
-                pass
+    with open(CURRENT_SOURCES_FILE, "w", encoding="utf-8") as fh:
+        json.dump(sources, fh, indent=2, ensure_ascii=False)
 
-        # Final filter: remove any UI/icon names that slipped in from fallbacks
-        sources = [s.strip() for s in sources if isinstance(s, str) and is_likely_source_name(s.strip())]
-        sources = list(dict.fromkeys(sources))
+    print(f"[OK] Wrote {len(sources)} source(s) to {CURRENT_SOURCES_FILE}")
+    return 0
 
-        if not sources:
-            debug_text = page.evaluate("""() => {
-                const btn = Array.from(document.querySelectorAll('button, [role="button"]')).find(b => /add\\s+source|sources|källor|lägg/i.test(b.textContent || b.getAttribute('aria-label') || ''));
-                const panel = btn ? (btn.closest('section') || btn.closest('aside') || btn.closest('[class*="sidebar"]') || btn.parentElement?.parentElement) : null;
-                return panel ? panel.innerText : (document.body?.innerText || '').slice(0, 8000);
-            }""")
-            debug_path = "export_sources_debug.txt"
-            with open(debug_path, "w", encoding="utf-8") as f:
-                f.write(debug_text if isinstance(debug_text, str) else str(debug_text))
-            print(f"[DEBUG] 0 sources found. Wrote panel text to {debug_path} – check it to adjust selectors.")
 
-        with open(CURRENT_SOURCES_FILE, "w", encoding="utf-8") as f:
-            json.dump(sources, f, indent=2, ensure_ascii=False)
-
-        print(f"[OK] Wrote {len(sources)} source(s) to {CURRENT_SOURCES_FILE}")
+def parse_args(argv=None):
+    """No options. The parser rejects unknown flags instead of ignoring them."""
+    parser = argparse.ArgumentParser(description="Scrape the notebook's Sources panel into current_sources.json.", epilog="Needs Chrome started with --remote-debugging-port=9222 and signed in.")
+    return parser.parse_args(argv)
 
 
 if __name__ == "__main__":
-    run_export()
+    parse_args()
+    raise SystemExit(run_export())
