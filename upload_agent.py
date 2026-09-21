@@ -2,8 +2,6 @@ import json
 import os
 import re
 
-from playwright.sync_api import sync_playwright
-
 from config import (
     ENFORCE_UPLOAD_SIZE_LIMIT,
     MANIFEST_PATH,
@@ -64,7 +62,10 @@ def get_upload_plan():
     return files
 
 
-def run_upload():
+def run_upload() -> int:
+    """Upload the planned files. Returns 0 only if every file uploaded."""
+    from playwright.sync_api import sync_playwright
+
     upload_plan = get_upload_plan()
 
     if upload_plan is not None:
@@ -73,7 +74,7 @@ def run_upload():
     else:
         if not os.path.exists(MANIFEST_PATH):
             print(f"Error: {MANIFEST_PATH} not found. Run organize_content.py first.")
-            return
+            return 1
         with open(MANIFEST_PATH, "r", encoding="utf-8") as f:
             manifest = json.load(f)
         upload_items = []
@@ -91,7 +92,9 @@ def run_upload():
 
     if not upload_items:
         print("--- Nothing to upload. ---")
-        return
+        return 0
+
+    succeeded, failed = [], []
 
     with sync_playwright() as p:
         try:
@@ -100,7 +103,7 @@ def run_upload():
             print(f"[OK] Connected via CDP. Driving tab: {describe_page(page)}")
         except BrowserConnectionError as e:
             print(f"[FAIL] {e}")
-            return
+            return 1
 
         page.goto(PROJECT_URL, wait_until="domcontentloaded")
         page.wait_for_load_state("load")
@@ -112,7 +115,7 @@ def run_upload():
             add_sources_btn.first.wait_for(state="visible", timeout=30_000)
         except Exception as e:
             print(f"[FAIL] '+ Add sources' button did not appear: {e}")
-            return
+            return 1
 
         current_chapter = None
         for file_info in upload_items:
@@ -142,6 +145,7 @@ def run_upload():
                 if is_upload_file:
                     if not os.path.exists(file_path):
                         print(f"   [FAIL] File not found: {file_path}")
+                        failed.append((file_name, "file not found"))
                         continue
                     size_mb = os.path.getsize(file_path) / (1024 * 1024)
                     if size_mb > MAX_UPLOAD_SIZE_MB:
@@ -150,6 +154,7 @@ def run_upload():
                                 f"   [SKIP] {file_name} ({size_mb:.1f} MB) exceeds configured limit "
                                 f"{MAX_UPLOAD_SIZE_MB} MB (ENFORCE_UPLOAD_SIZE_LIMIT=true)."
                             )
+                            failed.append((file_name, f"exceeds {MAX_UPLOAD_SIZE_MB} MB limit"))
                             page.keyboard.press("Escape")
                             page.wait_for_timeout(300)
                             page.keyboard.press("Escape")
@@ -189,9 +194,11 @@ def run_upload():
                     )
 
                 page.wait_for_timeout(3000)
+                succeeded.append(file_name)
                 print(f"   [OK] {file_name} uploaded.")
 
             except Exception as e:
+                failed.append((file_name, str(e).splitlines()[0][:120]))
                 print(f"   [FAIL] Failed to upload {file_name}: {e}")
                 try:
                     page.keyboard.press("Escape")
@@ -201,8 +208,13 @@ def run_upload():
                 except Exception:
                     pass
 
-    print("\n--- Autonomous upload process finished. ---")
+    # The caller deletes the sources these files replace, so a partial upload must
+    # be reported as failure rather than swallowed - see compare_sources.apply_review.
+    print(f"\n--- Upload finished: {len(succeeded)} succeeded, {len(failed)} failed ---")
+    for name, reason in failed:
+        print(f"   [FAIL] {name}: {reason}")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
-    run_upload()
+    raise SystemExit(run_upload())

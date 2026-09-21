@@ -93,8 +93,8 @@ python run_full_update.py
 ### Run individual steps
 
 - `python export_current_sources.py` — refresh `current_sources.json` only.
-- `python delete_agent.py --dedupe-current --dry-run` — preview duplicate cleanup. **Always run this first.**
-- `python delete_agent.py --dedupe-current` — remove duplicate copies, keeping one per source name. No longer part of `run_full_update.py`: it sweeps the whole notebook with no review gate, so it is opt-in and deliberate.
+- `python delete_agent.py --dedupe-current --dry-run` — **list** which titles appear more than once. Safe and useful.
+- `python delete_agent.py --dedupe-current` — **refuses to run.** See "Deduplication is retired" below.
 - `python delete_agent.py --fuzzy` — match sources on shared words instead of exact titles. **Unsafe.** On a real 144-source notebook this made 78% of titles match some *other* source, because chapter-prefixed filenames share most of their words. Only with `--dry-run` first.
 - `python extract_edx.py` — extract and parse the newest `course*.tar.gz` (or pass `--tar <file> --out <dir>`).
 - `python organize_content.py` — build organized content and manifest.
@@ -140,7 +140,38 @@ Update Study Buddy/
 
 - **File size:** Upload size checks are configurable. Default threshold is `MAX_UPLOAD_SIZE_MB=200`; by default oversized files are attempted with a warning. Set `ENFORCE_UPLOAD_SIZE_LIMIT=true` to hard-skip oversized files.
 - **Account:** Use the Chrome window started with `--remote-debugging-port=9222` and log in with the Google account that has editor access to the notebook.
-- **Duplicate cleanup:** `delete_agent.py --dedupe-current` removes extra copies of a source name, keeping one. It matches titles **exactly** by default and is bounded by the number of copies actually present. It is not run automatically — duplicates were themselves caused by a broken export (comparison saw no existing sources and re-uploaded everything), so a working export removes the need for routine deduplication.
+### Deduplication is retired
+
+`--dedupe-current` no longer deletes anything. **A title does not identify a source.**
+
+Web sources are titled from the target page's `<title>`, and many pages share one. This
+notebook contains **seven** separate sources all titled `Microsoft Forms` — seven
+different forms, not seven copies. Deleting "duplicates" by title would destroy six of
+them. The information needed to tell a copy from a distinct source is the *content*,
+which the script cannot see.
+
+- `--dedupe-current --dry-run` still lists repeated titles, which is genuinely useful.
+- `--dedupe-current` prints that list, explains the above, and exits non-zero.
+- `--dedupe-current --confirm-unsafe-dedupe` proceeds, for someone who has checked the
+  content themselves.
+
+Resolve duplicates in the notebook UI, where you can open each source. Duplicates were
+themselves caused by a broken export (comparison saw no existing sources and re-uploaded
+everything), so a working export removes the need for routine deduplication.
+
+### Safety behaviour
+
+- **Deletion matches titles exactly** and is bounded by the number of copies actually
+  present. `--fuzzy` restores word-overlap matching; on this notebook that made 78% of
+  titles match some *other* source, so it is opt-in and warns.
+- **Low-confidence matches default to `KEEP`.** Only pairs scoring ≥ 0.75 default to
+  `REPLACE`. Lower-scoring pairs still appear in the review file — promote them yourself.
+- **Negated actions are rejected.** `DO NOT DELETE` used to resolve to `DELETE`. Anything
+  containing a negation now fails validation and names the row instead of guessing.
+- **Uploads run before deletions**, and a failed upload cancels the deletions. A transient
+  duplicate is recoverable; a source deleted before its replacement arrives is not.
+- **Files are verified to exist** before anything is deleted.
+- **The review pause prints the actual delete list** before asking you to press Enter.
 - **Notebook URL:** NotebookLM is now "Gemini Notebook" at `notebook.google.com`. `config.py` points there; `notebooklm.google.com` still redirects. Override with `NOTEBOOKLM_PROJECT_URL`.
 
 ---

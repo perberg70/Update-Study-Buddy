@@ -51,6 +51,15 @@ def main():
     print("  Save the file when done, then press Enter here.")
     print("=" * 60)
 
+    # Show what will actually be deleted. Pressing Enter on an unseen plan is how
+    # a wrong match becomes a permanent deletion.
+    print()
+    print("--- Sources that WILL BE DELETED under the current review file ---")
+    subprocess.run([sys.executable, "delete_agent.py", "--dry-run"], check=False)
+    print("-" * 60)
+    print("  If anything above should not be deleted, edit comparison_review.json")
+    print("  now and set that row to KEEP, then press Enter.")
+
     try:
         input("\n>>> Press Enter to apply the reviewed plan (Ctrl+C to abort)... ")
     except KeyboardInterrupt:

@@ -39,6 +39,12 @@ ENFORCE_UPLOAD_SIZE_LIMIT = os.getenv("ENFORCE_UPLOAD_SIZE_LIMIT", "false").lowe
 }
 
 
+# A negated action is ambiguous, and the token scan below would resolve it to the
+# opposite of what was written: "DO NOT DELETE" once returned DELETE. Anything
+# matching this is handed back unchanged so validation rejects the row by name.
+NEGATION_RE = re.compile(r"\b(NOT|NEVER|NO|DONT|DOESNT)\b|N['\u2019]T", re.I)
+
+
 def normalize_action(value: str) -> str:
     """Normalize human-edited action values from review JSON.
 
@@ -46,8 +52,9 @@ def normalize_action(value: str) -> str:
     - "delete", "DELETE ", "DELETE (old)", "remove"
     - "add", "upload"
 
-    Supports whitespace, punctuation and common aliases so manual edits are
-    interpreted reliably across scripts.
+    Refuses to guess at negations ("do not delete", "never remove"): those come
+    back unchanged and fail validation, so the operator is asked rather than
+    silently given the opposite of what they wrote.
     """
     if value is None:
         return ""
@@ -65,9 +72,14 @@ def normalize_action(value: str) -> str:
         "SKIP": "SKIP",
     }
 
-    # Direct match first
+    # Direct match first: an unambiguous bare action word always wins.
     if raw in aliases:
         return aliases[raw]
+
+    # Never guess past a negation - returning the input unchanged makes it an
+    # invalid action, which apply_review reports with the row number.
+    if NEGATION_RE.search(raw):
+        return str(value).strip()
 
     # Token-based match handles annotations/comments like
     # "DELETE (old source)" or "add - new".

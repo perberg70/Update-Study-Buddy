@@ -474,11 +474,43 @@ def _execute_deletion_plan(plan, dry_run: bool = False, fuzzy: bool = False):
 def run_delete(dry_run: bool = False, fuzzy: bool = False):
     plan = get_sources_to_remove()
     _execute_deletion_plan(plan, dry_run=dry_run, fuzzy=fuzzy)
+    return 0
 
 
-def run_dedupe_current_sources(dry_run: bool = False, fuzzy: bool = False):
+DEDUPE_RETIRED_NOTICE = """
+[STOP] Refusing to deduplicate by title.
+
+  A source title does not identify a source. Titles for web sources come from
+  the target page's <title>, and many pages share one. In this notebook, seven
+  separate sources are all titled "Microsoft Forms" - seven different forms,
+  not seven copies. Deleting "duplicates" by title would destroy six of them.
+
+  The information needed to tell copies from distinct sources is the content,
+  which this script cannot see.
+
+  Resolve duplicates in the notebook UI, where you can open each source.
+  To see which titles repeat:
+
+      python delete_agent.py --dedupe-current --dry-run
+
+  If you have already checked the content and know these are true copies:
+
+      python delete_agent.py --dedupe-current --confirm-unsafe-dedupe
+"""
+
+
+def run_dedupe_current_sources(dry_run: bool = False, fuzzy: bool = False,
+                               confirmed: bool = False):
     plan = get_duplicate_sources_to_remove()
+
+    # Listing repeated titles is useful; acting on that list is not.
+    if not dry_run and not confirmed:
+        _execute_deletion_plan(plan, dry_run=True, fuzzy=fuzzy)
+        print(DEDUPE_RETIRED_NOTICE)
+        return 1
+
     _execute_deletion_plan(plan, dry_run=dry_run, fuzzy=fuzzy)
+    return 0
 
 
 if __name__ == "__main__":
@@ -491,6 +523,10 @@ if __name__ == "__main__":
         print("       treated as copies of each other. Run with --dry-run first.")
 
     if dedupe_current:
-        run_dedupe_current_sources(dry_run=dry_run, fuzzy=fuzzy)
+        code = run_dedupe_current_sources(
+            dry_run=dry_run, fuzzy=fuzzy,
+            confirmed="--confirm-unsafe-dedupe" in sys.argv,
+        )
     else:
-        run_delete(dry_run=dry_run, fuzzy=fuzzy)
+        code = run_delete(dry_run=dry_run, fuzzy=fuzzy)
+    raise SystemExit(code)

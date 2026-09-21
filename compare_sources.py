@@ -15,7 +15,13 @@ from config import CURRENT_SOURCES_FILE, MANIFEST_PATH, REVIEW_PATH
 import config as app_config
 
 STOP_WORDS = {"and", "the", "of", "in", "to", "a", "is", "for", "with", "on", "by", "an", "at", "or", "its"}
+
+# Below MATCH_THRESHOLD a pair is not written at all. Between the two, the pair is
+# written but defaults to KEEP - visible as a suggestion, not acted on. At or above
+# HIGH_CONFIDENCE it defaults to REPLACE. An exact name match scores ~0.8, so real
+# replacements still default correctly while near-misses need a deliberate edit.
 MATCH_THRESHOLD = 0.35
+HIGH_CONFIDENCE = 0.75
 
 
 def load_current_sources():
@@ -110,7 +116,10 @@ def compute_match_score(new_file, old_name):
             hits = len(old_words & content_kw)
             content_boost = min(hits / max(len(old_words), 1) * 0.15, 0.15)
 
-    score = max(sim * 0.5 + w_overlap * 0.3 + ch_overlap * 0.05 + content_boost, sim)
+    # Weighted score only. This used to be max(weighted, sim), which made the two
+    # signals independent triggers rather than one judgement: raw character
+    # similarity alone could pair names with no words in common.
+    score = sim * 0.5 + w_overlap * 0.3 + ch_overlap * 0.05 + content_boost
     return round(min(score, 1.0), 3)
 
 
@@ -176,7 +185,7 @@ def generate_review():
             "old_name": cs,
             "match_score": score,
             "match_reason": match_reason(nf["name"], cs, score),
-            "action": "REPLACE",
+            "action": "REPLACE" if score >= HIGH_CONFIDENCE else "KEEP",
         })
         matched_new.add(new_key)
         matched_old.add(cs)
@@ -208,6 +217,9 @@ def generate_review():
             "Review the matches below and set 'action' for each entry, then run:\n"
             "  python compare_sources.py --apply\n"
             "\n"
+            f"PAIRS defaulting to KEEP scored below {HIGH_CONFIDENCE}: check them and change to\n"
+            "REPLACE if the match is right. A wrong REPLACE deletes a source permanently.\n"
+            "\n"
             "PAIRS        -> REPLACE = delete old + upload new | DELETE = delete old only | KEEP = no change\n"
             "CURRENT_ONLY -> DELETE = remove from notebook | KEEP = leave as-is\n"
             "NEW_ONLY     -> ADD = upload to notebook | SKIP = don't upload"
@@ -220,8 +232,10 @@ def generate_review():
     with open(REVIEW_PATH, "w", encoding="utf-8") as f:
         json.dump(review, f, indent=4, ensure_ascii=False)
 
+    high = sum(1 for p in pairs if p["match_score"] >= HIGH_CONFIDENCE)
     print(f"[OK] Comparison review saved to {REVIEW_PATH}")
-    print(f"     {len(pairs)} matched pair(s)  (default: REPLACE)")
+    print(f"     {len(pairs)} matched pair(s): {high} default REPLACE (score >= {HIGH_CONFIDENCE}),")
+    print(f"       {len(pairs) - high} default KEEP (lower confidence - review and promote)")
     print(f"     {len(new_only)} new-only source(s)  (default: ADD)")
     print(f"     {len(current_only)} existing-only source(s)  (default: KEEP)")
     print()
@@ -274,28 +288,60 @@ def apply_review():
     total_delete = replace_n + delete_pair + delete_only
     total_upload = replace_n + add_n
 
+    # Every file must exist before anything is deleted: a missing file discovered
+    # mid-run means the old source is already gone and its replacement never arrives.
+    missing = []
+    for row, action in zip(review.get("pairs", []), normalized["pairs"]):
+        if action == "REPLACE":
+            path = row.get("new_path", "")
+            if not path or not os.path.exists(path):
+                missing.append((row.get("new_name", "?"), path))
+    for row, action in zip(review.get("new_only", []), normalized["new_only"]):
+        if action == "ADD":
+            path = row.get("path", "")
+            if not path or not os.path.exists(path):
+                missing.append((row.get("name", "?"), path))
+
+    if missing:
+        print(f"[FAIL] {len(missing)} file(s) to upload are missing from disk:")
+        for name, path in missing[:10]:
+            print(f"  - {name}  ({path or 'no path'})")
+        if len(missing) > 10:
+            print(f"  ... and {len(missing) - 10} more")
+        print("[FAIL] Nothing deleted. Re-run organize_content.py, or set those rows")
+        print("       to KEEP/SKIP in comparison_review.json.")
+        sys.exit(1)
+
     print("--- Applying reviewed comparison plan ---")
     print(f"  Pairs:        {replace_n} REPLACE, {delete_pair} DELETE, {keep_pair} KEEP")
     print(f"  Current-only: {delete_only} DELETE, {keep_only} KEEP")
     print(f"  New-only:     {add_n} ADD, {skip_n} SKIP")
-    print(f"  -> {total_delete} source(s) to delete, {total_upload} file(s) to upload")
+    print(f"  -> {total_upload} file(s) to upload, then {total_delete} source(s) to delete")
     print()
 
+    # Upload before delete. A transient duplicate is recoverable by deleting it;
+    # a source deleted before its replacement arrives is not recoverable at all.
+    if total_upload > 0:
+        print("--- Running upload_agent.py ---")
+        result = subprocess.run([sys.executable, "upload_agent.py"], check=False)
+        if result.returncode != 0:
+            print(f"\n[FAIL] upload_agent.py exited with code {result.returncode}.")
+            print("[FAIL] Skipping all deletions: the sources marked for deletion are")
+            print("       still the only copies. Fix the uploads and re-run --apply;")
+            print("       rows that already uploaded can be set to SKIP first.")
+            sys.exit(1)
+    else:
+        print("--- No files to upload. ---")
+
     if total_delete > 0:
-        print("--- Running delete_agent.py ---")
+        print("\n--- Running delete_agent.py ---")
         result = subprocess.run([sys.executable, "delete_agent.py"], check=False)
         if result.returncode != 0:
             print(f"[WARN] delete_agent.py exited with code {result.returncode}")
+            print("\n--- Apply finished with errors. ---")
+            sys.exit(1)
     else:
         print("--- No sources to delete. ---")
-
-    if total_upload > 0:
-        print("\n--- Running upload_agent.py ---")
-        result = subprocess.run([sys.executable, "upload_agent.py"], check=False)
-        if result.returncode != 0:
-            print(f"[WARN] upload_agent.py exited with code {result.returncode}")
-    else:
-        print("--- No files to upload. ---")
 
     print("\n--- Apply complete. ---")
 
