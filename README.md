@@ -222,6 +222,33 @@ Note: an image's `alt` text is still included, as `[Image: ...]`. The PDF embeds
 images, so that text is the only trace of one. Where an image's long description was
 itself `sr-only`, the alt text can end up referring to a description that was skipped.
 
+### Video transcripts
+
+Three sources, cheapest first. All of them write `<video url_name>.txt` into
+`transcripts/`, which `build_module_pdf.py` reads automatically.
+
+| Source | Command | Cost |
+|---|---|---|
+| Transcripts inside the export | none — used automatically | free |
+| YouTube captions | `python tools\fetch_youtube_transcripts.py --module 1` | one HTTP request each |
+| Teams recordings | export the VTT, drop it in `transcripts\` | manual, best quality for webinars |
+| Everything else (short clips) | `python tools\transcribe_videos.py --module 1` | local CPU time |
+
+`transcribe_videos.py` runs **entirely on your machine** — `AGENTS.md` forbids sending
+course content to a third-party service, so no cloud speech-to-text option exists here.
+It needs one of:
+
+```powershell
+pip install faster-whisper     # recommended: several times quicker on CPU
+pip install openai-whisper     # alternative; pulls in torch
+```
+
+It transcribes only what nothing cheaper already covers, and only short videos —
+`--max-minutes` (default 20) keeps hour-long webinars out, since their Teams export is
+both faster and more accurate. Always start with `--dry-run`: it prints exactly which
+videos it would do, which it would skip and why, and a rough time estimate, without
+downloading anything.
+
 ### Video downloads
 
 `organize_content.py` fetches and transcodes every video with a direct `.mp4`, which for
