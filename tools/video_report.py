@@ -86,10 +86,17 @@ def has_direct_mp4(video_root):
 
 
 def inspect(chapter, archive):
-    """One row per video component in *chapter*."""
+    """One row per video component in *chapter*.
+
+    Hidden videos are reported, not dropped: this says what the export holds.
+    But each carries why a student cannot see it, so the count here and the
+    count in a module PDF - which skips them - do not disagree silently.
+    """
     rows = []
     for seq in chapter.get("sequentials", []):
         for vert in seq.get("verticals", []):
+            hidden = (chapter.get("hidden") or seq.get("hidden")
+                      or vert.get("hidden") or "")
             for comp in vert.get("components", []):
                 if comp.get("type") != "video":
                     continue
@@ -97,7 +104,8 @@ def inspect(chapter, archive):
                 xml = archive.read_text(f"video/{url_name}.xml")
                 row = {"unit": seq.get("title", ""), "subunit": vert.get("title", ""),
                        "title": url_name, "duration": 0.0, "mp4": False,
-                       "youtube": "", "transcripts": [], "referenced": 0, "readable": False}
+                       "youtube": "", "transcripts": [], "referenced": 0,
+                       "readable": False, "hidden": hidden}
                 if xml is not None:
                     try:
                         root = ET.fromstring(xml)
@@ -149,20 +157,31 @@ def main() -> int:
         print(f"[FAIL] {exc}")
         return 1
 
-    totals = {"videos": 0, "duration": 0.0, "with_transcript": 0,
+    totals = {"videos": 0, "duration": 0.0, "with_transcript": 0, "hidden": 0,
               "youtube": 0, "mp4": 0, "referenced": 0, "no_source": 0}
 
     for module in modules:
         rows = [r for ch in module["chapters"] for r in inspect(ch, archive)]
         if not rows:
             continue
-        secs = sum(r["duration"] for r in rows)
-        got = sum(1 for r in rows if r["transcripts"])
+        visible = [r for r in rows if not r["hidden"]]
+        secs = sum(r["duration"] for r in visible)
+        got = sum(1 for r in visible if r["transcripts"])
         print(f"\n{module_label(module)}")
-        print(f"   {len(rows)} video(s), {hhmm(secs)} total, "
+        print(f"   {len(visible)} video(s) students can see, {hhmm(secs)} total, "
               f"{got} with a transcript file")
+        if len(rows) != len(visible):
+            print(f"   {len(rows) - len(visible)} more in the export but hidden "
+                  "from students (not built into PDFs)")
 
         for row in rows:
+            if row["hidden"]:
+                if args.verbose:
+                    print(f"     [{'hidden':10}] {hhmm(row['duration']):>7}  "
+                          f"{row['title'][:58]}")
+                    print(f"     {'':12} {row['hidden']}")
+                totals["hidden"] += 1
+                continue
             totals["videos"] += 1
             totals["duration"] += row["duration"]
             totals["referenced"] += 1 if row["referenced"] else 0
@@ -188,7 +207,10 @@ def main() -> int:
                      if name.lower().endswith((".srt", ".sjson")))
 
     print("\n" + "=" * 68)
-    print(f"  videos                    {totals['videos']}")
+    print(f"  videos students can see   {totals['videos']}")
+    if totals["hidden"]:
+        print(f"  hidden from students      {totals['hidden']}  "
+              "(--verbose lists them)")
     print(f"  total duration            {hhmm(totals['duration'])}"
           f"{'  (durations absent from the XML)' if not totals['duration'] else ''}")
     print(f"  transcript file found     {totals['with_transcript']}")

@@ -34,9 +34,16 @@ def build_fixture(base):
                         'youtube_id_1_0="1.00:dQw4w9WgXcQ">'
                         '<video_asset duration="2700"/></video>',
     }
+    # v4 sits in a staff-only subunit: in the export, absent from the course.
+    files["video/v4.xml"] = ('<video display_name="Staff Only">'
+                             '<video_asset duration="600">'
+                             '<encoded_video url="https://x/d.mp4"/></video_asset></video>')
+
     chapter = {"title": "1. Test", "sequentials": [{"title": "U", "verticals": [
         {"title": "S", "components": [{"type": "video", "url_name": f"v{i}"}
-                                      for i in (1, 2, 3)]}]}]}
+                                      for i in (1, 2, 3)]},
+        {"title": "Retired", "hidden": "visible_to_staff_only=true",
+         "components": [{"type": "video", "url_name": "v4"}]}]}]}
     return open_archive(os.path.join(base, "course.test.tar.gz"), files), chapter
 
 
@@ -46,8 +53,19 @@ def main():
         archive, chapter = build_fixture(base)
         rows = {r["title"]: r for r in inspect(chapter, archive)}
 
-        if len(rows) != 3:
-            failures.append(f"expected 3 videos, got {len(rows)}")
+        if len(rows) != 4:
+            failures.append(f"expected 4 rows, got {len(rows)}")
+
+        # Reported, but marked - a reporter that silently dropped it would
+        # disagree with the PDF's count for no visible reason.
+        staff = rows.get("Staff Only", {})
+        if not staff:
+            failures.append("a hidden video should still be reported")
+        elif staff.get("hidden") != "visible_to_staff_only=true":
+            failures.append(f"it should carry why: {staff.get('hidden')!r}")
+        for name in ("Has Transcript", "Broken Reference", "YouTube Hosted"):
+            if rows.get(name, {}).get("hidden"):
+                failures.append(f"{name} is visible and must not be marked hidden")
 
         got = rows.get("Has Transcript", {})
         if not got.get("transcripts"):
@@ -69,9 +87,9 @@ def main():
         if tube.get("mp4"):
             failures.append("a YouTube-only video has no direct mp4")
 
-        total = sum(r["duration"] for r in rows.values())
+        total = sum(r["duration"] for r in rows.values() if not r["hidden"])
         if total != 4800:
-            failures.append(f"durations should total 4800s, got {total}")
+            failures.append(f"visible durations should total 4800s, got {total}")
 
     root = ET.fromstring('<video><video_asset duration="nonsense"/></video>')
     if parse_duration(root) != 0.0:
@@ -82,6 +100,7 @@ def main():
     if not failures:
         print("  [PASS] transcript / dangling-reference / youtube / mp4 all classified")
         print("  [PASS] durations total, bad duration handled")
+        print("  [PASS] hidden videos reported and marked, excluded from totals")
     return not failures
 
 
