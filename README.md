@@ -190,6 +190,36 @@ modification time is used. OneDrive updates mtimes on sync, so "newest" can mean
 recently synced" rather than "most recently exported". Pass `--tar` explicitly when it
 matters.
 
+### Content the course page does not show
+
+An export carries what the course *holds*, not what a student *sees*. Two things reach a
+generated document without ever being on the page:
+
+- **Units hidden in the OLX** — `visible_to_staff_only`, `hide_from_toc`. Retired or
+  draft material stays in the export.
+- **Text hidden by CSS** — `sr-only`, `visually-hidden`, `display:none`. This is the
+  standard screen-reader pattern: an image carries a long text description that sighted
+  users never see. It is correct markup, but read as body prose in a study document it
+  looks like content that contradicts the page.
+
+`build_module_pdf.py` skips both by default and **says what it skipped** — a silent drop
+would be as bad as a silent inclusion. `--include-hidden` keeps everything.
+
+To trace a specific phrase back to its source:
+
+```powershell
+python tools/find_text.py "a phrase from the PDF"
+```
+
+It names the component, its chapter/unit/subunit, every visibility attribute on that
+chain, whether CSS hides the match, and prints the raw HTML around it. If the phrase is
+in no component at all, the document was built from a different export — which it now
+tells you outright.
+
+Note: an image's `alt` text is still included, as `[Image: ...]`. The PDF embeds no
+images, so that text is the only trace of one. Where an image's long description was
+itself `sr-only`, the alt text can end up referring to a description that was skipped.
+
 ### Video downloads
 
 `organize_content.py` fetches and transcodes every video with a direct `.mp4`, which for

@@ -37,6 +37,29 @@ from olx_archive import (CourseArchiveError, describe_source,  # noqa: E402
 MODULE_NUMBER_RE = re.compile(r"^\s*(\d+)")
 NO_TRANSCRIPT = "[no transcript in export]"
 
+# Text hidden from sighted users but left for screen readers. It is real
+# content and correct markup, but it is not what the course page shows - and a
+# long image description read as body prose is actively confusing in a study
+# document. Skipped by default, restored with --include-hidden.
+HIDDEN_CLASS_RE = re.compile(
+    r"\b(sr-only|sr_only|screen-?reader(-only|-text)?|visually-?hidden|"
+    r"hidden|hide|a11y-?only|accessible-?text|invisible)\b", re.I)
+HIDDEN_STYLE_RE = re.compile(
+    r"display\s*:\s*none|visibility\s*:\s*hidden|"
+    r"(?:left|top|text-indent)\s*:\s*-\d{4,}", re.I)
+
+
+def hides_content(attrs):
+    """True when an element's own attributes keep it off the rendered page."""
+    values = dict(attrs)
+    if HIDDEN_CLASS_RE.search(values.get("class") or ""):
+        return True
+    if HIDDEN_STYLE_RE.search(values.get("style") or ""):
+        return True
+    if "hidden" in values:
+        return True
+    return (values.get("aria-hidden") or "").strip().lower() == "true"
+
 
 # --------------------------------------------------------------------------
 # Module grouping
@@ -95,12 +118,20 @@ class HtmlToBlocks(HTMLParser):
     """
 
     SKIP = {"script", "style", "head", "title"}
+    VOID = {"br", "img", "hr", "input", "meta", "link", "area", "base",
+            "col", "embed", "param", "source", "track", "wbr"}
     HEADINGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
     BREAKS = {"p", "div", "section", "article", "br", "tr", "ul", "ol", "table", "blockquote"}
 
-    def __init__(self):
+    def __init__(self, include_hidden=False):
         super().__init__(convert_charrefs=True)
         self.blocks, self._buf, self._skip, self._kind, self._href = [], [], 0, "para", ""
+        self.include_hidden = include_hidden
+        # Depth counting, not a flag: nested elements inside a hidden one must
+        # not un-hide it when the inner element closes.
+        self._hidden_depth = 0
+        self._open = []
+        self.hidden_chars = 0
 
     def _flush(self):
         text = " ".join("".join(self._buf).split())
@@ -114,6 +145,18 @@ class HtmlToBlocks(HTMLParser):
             return
         if self._skip:
             return
+
+        if not self.include_hidden and tag not in self.VOID:
+            hiding = hides_content(attrs)
+            self._open.append((tag, hiding))
+            if hiding:
+                if not self._hidden_depth:
+                    self._flush()   # keep hidden text out of the block being built
+                self._hidden_depth += 1
+
+        if self._hidden_depth:
+            return
+
         if tag in self.HEADINGS:
             self._flush()
             self._kind = "head"
@@ -135,6 +178,19 @@ class HtmlToBlocks(HTMLParser):
             return
         if self._skip:
             return
+
+        if not self.include_hidden and tag not in self.VOID:
+            for i in range(len(self._open) - 1, -1, -1):
+                if self._open[i][0] == tag:
+                    for _, hiding in self._open[i:]:
+                        if hiding:
+                            self._hidden_depth = max(0, self._hidden_depth - 1)
+                    del self._open[i:]
+                    break
+
+        if self._hidden_depth:
+            return
+
         if tag == "a":
             if self._href.startswith(("http://", "https://")):
                 self._buf.append(f" <{self._href}> ")
@@ -143,19 +199,26 @@ class HtmlToBlocks(HTMLParser):
             self._flush()
 
     def handle_data(self, data):
-        if not self._skip:
-            self._buf.append(data)
+        if self._skip:
+            return
+        if self._hidden_depth:
+            self.hidden_chars += len(data.strip())
+            return
+        self._buf.append(data)
 
     def close(self):
         super().close()
         self._flush()
 
 
-def html_blocks(archive, relpath):
+def html_blocks(archive, relpath, include_hidden=False, stats=None):
     try:
-        parser = HtmlToBlocks()
+        parser = HtmlToBlocks(include_hidden=include_hidden)
         parser.feed(archive.read_text(relpath) or "")
         parser.close()
+        if stats is not None and parser.hidden_chars:
+            stats["hidden_text_components"] = stats.get("hidden_text_components", 0) + 1
+            stats["hidden_chars"] = stats.get("hidden_chars", 0) + parser.hidden_chars
         return parser.blocks
     except Exception as exc:
         return [("para", f"[could not read {os.path.basename(relpath)}: {exc}]")]
@@ -416,7 +479,7 @@ def build_styles(fonts=None):
 
 
 def module_story(module, archive, styles, stats, unicode_ok=True,
-                 transcripts_dir=None):
+                 transcripts_dir=None, include_hidden=False):
     """Flowables for one module, in course order."""
     from reportlab.platypus import Paragraph, Spacer
     from reportlab.lib.units import mm
@@ -427,15 +490,29 @@ def module_story(module, archive, styles, stats, unicode_ok=True,
     story = [para(module_label(module), styles["title"])]
     multi = len(module["chapters"]) > 1
 
+    def skip(node, kind):
+        """Record a node students cannot see, and say so rather than dropping it."""
+        if include_hidden or not node.get("hidden"):
+            return False
+        stats["hidden_nodes"].append(
+            (kind, node.get("title", "(untitled)"), node["hidden"]))
+        return True
+
     for chapter in module["chapters"]:
+        if skip(chapter, "chapter"):
+            continue
         if multi:
             story.append(para(chapter.get("title", "(untitled)"), styles["chapter"]))
 
         for seq in chapter.get("sequentials", []):
+            if skip(seq, "unit"):
+                continue
             story.append(para(seq.get("title", "(untitled unit)"), styles["unit"]))
             stats["units"] += 1
 
             for vert in seq.get("verticals", []):
+                if skip(vert, "subunit"):
+                    continue
                 story.append(para(vert.get("title", "(untitled subunit)"), styles["subunit"]))
                 stats["subunits"] += 1
 
@@ -447,7 +524,8 @@ def module_story(module, archive, styles, stats, unicode_ok=True,
                         if not archive.exists(relpath):
                             continue
                         stats["html"] += 1
-                        for kind, text in html_blocks(archive, relpath):
+                        for kind, text in html_blocks(archive, relpath,
+                                                      include_hidden, stats):
                             if kind == "head":
                                 story.append(para(text, styles["inner"]))
                             elif kind == "item":
@@ -503,6 +581,9 @@ def main() -> int:
     parser.add_argument("--tar", dest="tar_path",
                         help="course .tar.gz to read (default: the one "
                              "course_structure.json was built from)")
+    parser.add_argument("--include-hidden", action="store_true",
+                        help="also include staff-only units and text hidden from "
+                             "sighted users (both are skipped by default)")
     args = parser.parse_args()
 
     if not os.path.exists(COURSE_STRUCTURE_PATH):
@@ -554,9 +635,11 @@ def main() -> int:
         print("       transliterated to ASCII rather than dropped.")
 
     stats = {"units": 0, "subunits": 0, "html": 0, "videos": 0, "transcripts": 0,
-             "from_olx": 0, "from_store": 0, "video_missing": 0, "skipped": {}}
+             "from_olx": 0, "from_store": 0, "video_missing": 0, "skipped": {},
+             "hidden_nodes": [], "hidden_text_components": 0, "hidden_chars": 0}
     story = module_story(module, archive, styles, stats, unicode_ok=bool(fonts),
-                         transcripts_dir=args.transcripts_dir)
+                         transcripts_dir=args.transcripts_dir,
+                         include_hidden=args.include_hidden)
 
     os.makedirs(args.out_dir, exist_ok=True)
     out_path = os.path.join(args.out_dir, module_filename(module))
@@ -582,6 +665,25 @@ def main() -> int:
     if stats["skipped"]:
         detail = ", ".join(f"{n} {t}" for t, n in sorted(stats["skipped"].items()))
         print(f"     not included: {detail}")
+
+    # Anything left out because students cannot see it is named, never dropped
+    # quietly - the point is that the PDF matches the course page, and that is
+    # only checkable if the difference is stated.
+    if stats["hidden_nodes"]:
+        print(f"\n     {len(stats['hidden_nodes'])} node(s) skipped as hidden "
+              "from students:")
+        for kind, title, why in stats["hidden_nodes"][:10]:
+            print(f"       {kind:8} {str(title)[:40]:40} {why}")
+        if len(stats["hidden_nodes"]) > 10:
+            print(f"       ... and {len(stats['hidden_nodes']) - 10} more")
+    if stats["hidden_text_components"]:
+        print(f"\n     {stats['hidden_chars']} character(s) of screen-reader-only "
+              f"text skipped across {stats['hidden_text_components']} component(s).")
+        print("     That is text the course page does not show (sr-only / "
+              "display:none).")
+    if stats["hidden_nodes"] or stats["hidden_text_components"]:
+        print("     Re-run with --include-hidden to keep it, or trace one phrase with:")
+        print('       python tools/find_text.py "<a phrase from the PDF>"')
     return 0
 
 
