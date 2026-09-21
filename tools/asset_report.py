@@ -48,6 +48,32 @@ TEXT_READY = {".txt": "stdlib", ".md": "stdlib", ".html": "stdlib",
               ".docx": "stdlib (zip + xml)", ".pdf": "needs pdfminer.six",
               ".xlsx": "stdlib (zip + xml), but a sheet reads poorly as prose"}
 
+# Audio uploaded as course material - an AI summary of a section, say. Speech,
+# so the existing local Whisper path applies rather than a document reader.
+AUDIO_SUFFIXES = (".m4a", ".mp3", ".wav", ".ogg", ".aac", ".flac")
+
+
+def url_name(stored_name):
+    """The /static/ spelling of a stored filename.
+
+    edX keeps the uploaded name, spaces and all, but its static URLs replace
+    spaces with underscores - so static/"AI Shifts.png" is linked as
+    /static/AI_Shifts.png. Matching the two literally reports every such file
+    as both missing and unreferenced at once.
+    """
+    return stored_name.replace(" ", "_")
+
+
+def build_lookup(present):
+    """{url spelling: stored name}, plus any pair that collides."""
+    lookup, collisions = {}, {}
+    for stored in present:
+        key = url_name(stored)
+        if key in lookup and lookup[key] != stored:
+            collisions.setdefault(key, [lookup[key]]).append(stored)
+        lookup[key] = stored
+    return lookup, collisions
+
 
 def pdf_reader_available():
     for module in ("pdfminer", "pypdf"):
@@ -88,6 +114,8 @@ def classify(name, archive, pdf_lib):
     ext = os.path.splitext(name)[1].lower()
     if name.lower().endswith(TRANSCRIPT_SUFFIXES):
         return "transcript", "already used by the transcript resolver"
+    if ext in AUDIO_SUFFIXES:
+        return "audio", "speech - transcribable with the local Whisper path"
     if ext in (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"):
         return "image", "no text - would need OCR"
     how = TEXT_READY.get(ext)
@@ -132,9 +160,16 @@ def main() -> int:
             return 1
 
     present = archive.listdir("static")
+    lookup, collisions = build_lookup(present)
     pdf_lib = pdf_reader_available()
 
     print(f"\n{len(present)} file(s) in the archive's static/\n")
+    if collisions:
+        print("[WARN] Different files share one /static/ spelling, so a link to")
+        print("       them is ambiguous:")
+        for key, names in list(collisions.items())[:5]:
+            print(f"         {key}  <-  {', '.join(names)}")
+        print()
 
     referenced, missing = {}, {}
     for module in modules:
@@ -143,14 +178,16 @@ def main() -> int:
             continue
         print(module_label(module))
         for name, where in sorted(assets.items()):
-            if name not in present:
+            stored = lookup.get(name)
+            if stored is None:
                 missing.setdefault(name, []).extend(where)
                 print(f"   [MISSING]  {name}  - linked but not in the archive")
                 continue
-            referenced.setdefault(name, []).extend(where)
-            kind, how = classify(name, archive, pdf_lib)
-            size = human(archive.size(f"static/{name}"))
-            print(f"   [{kind:10}] {name}  ({size})")
+            referenced.setdefault(stored, []).extend(where)
+            kind, how = classify(stored, archive, pdf_lib)
+            size = human(archive.size(f"static/{stored}"))
+            shown = stored if stored == name else f"{stored}  (linked as {name})"
+            print(f"   [{kind:10}] {shown}  ({size})")
             print(f"   {'':12} {how}")
             print(f"   {'':12} linked from: {where[0]}"
                   + (f" (+{len(where) - 1} more)" if len(where) > 1 else ""))
@@ -161,8 +198,12 @@ def main() -> int:
                     and not n.lower().endswith(TRANSCRIPT_SUFFIXES)]
 
     print("=" * 68)
-    docs = sum(1 for n in referenced if classify(n, archive, pdf_lib)[0] == "document")
-    print(f"  linked from a module's HTML   {len(referenced)}  ({docs} document(s))")
+    kinds = {}
+    for n in referenced:
+        kinds[classify(n, archive, pdf_lib)[0]] = kinds.get(
+            classify(n, archive, pdf_lib)[0], 0) + 1
+    detail = ", ".join(f"{v} {k}" for k, v in sorted(kinds.items()))
+    print(f"  linked from a module's HTML   {len(referenced)}  ({detail})")
     print(f"  in static/ but linked nowhere {len(unreferenced)}")
     print(f"  linked but absent             {len(missing)}")
     if not pdf_lib:

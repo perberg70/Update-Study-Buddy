@@ -37,13 +37,18 @@ FILES = {
     "vertical/v3.xml": '<vertical display_name="S3"><html url_name="h3"/></vertical>',
     "html/h1.html": '<a href="/static/handbook.pdf">h</a>'
                     '<img src="/static/pic.png"/>'
-                    '<a href="/static/handbook.pdf?v=2#page3">again, with query</a>',
+                    '<a href="/static/handbook.pdf?v=2#page3">again, with query</a>'
+                    # edX links with underscores what it stores with spaces
+                    '<a href="/static/AI_Shifts.png">shifts</a>'
+                    '<a href="/static/Section_5_summary.m4a">audio</a>',
     "html/h2.html": "<a href='/static/brief.docx'>b</a>"
                     '<a href="/static/gone.pdf">dead</a>',
     "html/h3.html": '<a href="/static/staff_only.pdf">hidden</a>',
     "static/handbook.pdf": "%PDF",
     "static/brief.docx": "PK",
     "static/pic.png": "PNG",
+    "static/AI Shifts.png": "PNG",
+    "static/Section 5 summary.m4a": "audio bytes",
     "static/orphan.pdf": "%PDF",
     "static/subs_a.srt.sjson": '{"text":[]}',
 }
@@ -64,8 +69,9 @@ def main():
         one = ar.module_assets(by_number["1"], archive)
         two = ar.module_assets(by_number["2"], archive)
 
-        check(failures, set(one) == {"handbook.pdf", "pic.png"},
-              f"module 1 should link the handbook and the image, got {sorted(one)}")
+        check(failures, set(one) == {"handbook.pdf", "pic.png",
+                                     "AI_Shifts.png", "Section_5_summary.m4a"},
+              f"module 1's links, as written in the HTML: {sorted(one)}")
         check(failures, set(two) == {"brief.docx", "gone.pdf"},
               f"module 2 should link the brief and the dead link, got {sorted(two)}")
         check(failures, "handbook.pdf" not in two and "brief.docx" not in one,
@@ -93,9 +99,29 @@ def main():
         check(failures, kind == "document" and "pdfminer" in how,
               f"with no pdf library, a pdf must say what is needed: {how}")
 
+        # edX stores "AI Shifts.png" and links /static/AI_Shifts.png. Matching
+        # those literally reported every such file as missing AND unreferenced
+        # at once - 26 of each on the real course.
+        lookup, collisions = ar.build_lookup(archive.listdir("static"))
+        check(failures, lookup.get("AI_Shifts.png") == "AI Shifts.png",
+              "a space-named file must resolve from its underscore link")
+        check(failures, not collisions, f"no collisions expected here: {collisions}")
+        check(failures, ar.url_name("a b c.png") == "a_b_c.png",
+              "every space becomes an underscore")
+
+        # Course audio is speech, so the Whisper path applies, not a doc reader.
+        kind, how = ar.classify("Section 5 summary.m4a", archive, pdf_lib)
+        check(failures, kind == "audio" and "Whisper" in how,
+              f"an .m4a is transcribable audio, got {kind}/{how}")
+
+        # Two stored names collapsing to one link is ambiguous and must be said.
+        _, clash = ar.build_lookup(["a b.png", "a_b.png"])
+        check(failures, "a_b.png" in clash,
+              "two files sharing one /static/ spelling should be flagged")
+
         # An orphan is real: it exists but no module has a claim on it.
         present = archive.listdir("static")
-        referenced = set(one) | set(two)
+        referenced = {lookup[n] for n in (set(one) | set(two)) if n in lookup}
         orphans = [n for n in present if n not in referenced
                    and not n.lower().endswith(ar.TRANSCRIPT_SUFFIXES)]
         check(failures, orphans == ["orphan.pdf"],
@@ -107,6 +133,8 @@ def main():
         print("  [PASS] assets attributed to the module whose HTML links them")
         print("  [PASS] query strings stripped, hidden units excluded, orphans found")
         print("  [PASS] type classification says whether text is reachable")
+        print("  [PASS] edX's space-to-underscore link spelling resolved; audio")
+        print("         recognised as transcribable; ambiguous spellings flagged")
     return not failures
 
 
