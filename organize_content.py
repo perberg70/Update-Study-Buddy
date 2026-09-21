@@ -9,6 +9,7 @@ import urllib.request
 import html
 
 from config import COURSE_STRUCTURE_PATH, EXTRACT_DIR, MANIFEST_PATH, ORGANIZED_CONTENT_DIR
+from extract_edx import find_course_root
 
 
 def slugify(text):
@@ -73,6 +74,13 @@ def organize_course(extract_dir, output_dir):
     with open(struct_path, "r", encoding="utf-8") as f:
         structure = json.load(f)
 
+    # The archive may or may not wrap everything in a course/ directory.
+    try:
+        course_root = find_course_root(extract_dir)
+    except FileNotFoundError as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
+
     manifest = []
 
     for i, chapter in enumerate(structure["chapters"]):
@@ -89,7 +97,7 @@ def organize_course(extract_dir, output_dir):
                 for comp in vert["components"]:
                     # 1. Process HTML Content
                     if comp["type"] == "html":
-                        html_path = os.path.join(extract_dir, "course", "html", f"{comp['url_name']}.html")
+                        html_path = os.path.join(course_root, "html", f"{comp['url_name']}.html")
                         if os.path.exists(html_path):
                             try:
                                 with open(html_path, "r", encoding="utf-8") as hf:
@@ -99,7 +107,7 @@ def organize_course(extract_dir, output_dir):
                     
                     # 2. Process Video Content (Download & Convert)
                     elif comp["type"] == "video":
-                        video_xml_path = os.path.join(extract_dir, "course", "video", f"{comp['url_name']}.xml")
+                        video_xml_path = os.path.join(course_root, "video", f"{comp['url_name']}.xml")
                         if os.path.exists(video_xml_path):
                             try:
                                 tree = ET.parse(video_xml_path)
@@ -150,7 +158,7 @@ def organize_course(extract_dir, output_dir):
 
     # Process Global Assets (Existing documents/audio)
     static_output = os.path.join(output_dir, "Global_Assets")
-    static_src = os.path.join(extract_dir, "course", "static")
+    static_src = os.path.join(course_root, "static")
     if os.path.exists(static_src):
         os.makedirs(static_output, exist_ok=True)
         for f in os.listdir(static_src):

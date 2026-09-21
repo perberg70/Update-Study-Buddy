@@ -22,11 +22,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import compare_sources as cs  # noqa: E402
 from config import COURSE_STRUCTURE_PATH, CURRENT_SOURCES_FILE, EXTRACT_DIR  # noqa: E402
+from extract_edx import find_course_root  # noqa: E402
 from organize_content import chapter_dir_name, video_output_name  # noqa: E402
 
 
 def predicted_names(structure, extract_dir):
     """Names organize_content.py would produce, as (name, type, chapter) tuples."""
+    course_root = find_course_root(extract_dir)
     out = []
     for index, chapter in enumerate(structure["chapters"]):
         ch_name = chapter_dir_name(index, chapter["title"])
@@ -37,14 +39,14 @@ def predicted_names(structure, extract_dir):
                 for comp in vert.get("components", []):
                     if comp["type"] == "html":
                         html_path = os.path.join(
-                            extract_dir, "course", "html", f"{comp['url_name']}.html"
+                            course_root, "html", f"{comp['url_name']}.html"
                         )
                         if os.path.exists(html_path):
                             has_html = True
 
                     elif comp["type"] == "video":
                         xml_path = os.path.join(
-                            extract_dir, "course", "video", f"{comp['url_name']}.xml"
+                            course_root, "video", f"{comp['url_name']}.xml"
                         )
                         if not os.path.exists(xml_path):
                             continue
@@ -76,7 +78,11 @@ def main() -> int:
     with open(COURSE_STRUCTURE_PATH, "r", encoding="utf-8") as fh:
         structure = json.load(fh)
 
-    names = predicted_names(structure, EXTRACT_DIR)
+    try:
+        names = predicted_names(structure, EXTRACT_DIR)
+    except FileNotFoundError as exc:
+        print(f"[FAIL] {exc}")
+        return 1
     if not names:
         print("[FAIL] No names predicted. Is edx_export/ populated?")
         return 1

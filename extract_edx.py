@@ -9,13 +9,70 @@ from config import COURSE_STRUCTURE_PATH, EXTRACT_DIR, resolve_tar_path
 
 
 def safe_extract(tar: tarfile.TarFile, path: str) -> None:
-    """Extract tar safely by preventing path traversal."""
+    """Extract *tar* into *path*, refusing anything that escapes it."""
     base = os.path.abspath(path)
     for member in tar.getmembers():
         target = os.path.abspath(os.path.join(base, member.name))
         if not target.startswith(base + os.sep) and target != base:
             raise RuntimeError(f"Unsafe archive entry blocked: {member.name}")
-    tar.extractall(path=path)
+
+    # filter="data" also rejects absolute paths, links pointing outside the
+    # destination, and device/FIFO members, which the name check above cannot
+    # see. It is the default from Python 3.14; passing it explicitly silences
+    # the deprecation warning and gets the protection now.
+    try:
+        try:
+            tar.extractall(path=path, filter="data")
+            return
+        except tarfile.FilterError as exc:
+            raise RuntimeError(f"Unsafe archive entry blocked: {exc}") from None
+    except TypeError:
+        # Python < 3.12: no filter argument. Reject links by hand instead.
+        for member in tar.getmembers():
+            if member.issym() or member.islnk():
+                link_target = os.path.abspath(
+                    os.path.join(base, os.path.dirname(member.name), member.linkname)
+                )
+                if not link_target.startswith(base + os.sep):
+                    raise RuntimeError(f"Unsafe link entry blocked: {member.name}")
+            elif not (member.isfile() or member.isdir()):
+                raise RuntimeError(f"Unsafe special entry blocked: {member.name}")
+        tar.extractall(path=path)
+
+
+def find_course_root(extract_dir: str) -> str:
+    """Return the directory directly containing course.xml.
+
+    Open edX archives come in more than one shape:
+    - an import archive built for upload has course.xml at its root;
+    - a Studio export wraps everything in a single directory, named after the
+      course run, which is not always literally "course".
+    """
+    direct = os.path.join(extract_dir, "course.xml")
+    if os.path.exists(direct):
+        return extract_dir
+
+    conventional = os.path.join(extract_dir, "course")
+    if os.path.exists(os.path.join(conventional, "course.xml")):
+        return conventional
+
+    candidates = [
+        os.path.join(extract_dir, entry)
+        for entry in sorted(os.listdir(extract_dir))
+        if os.path.isdir(os.path.join(extract_dir, entry))
+        and os.path.exists(os.path.join(extract_dir, entry, "course.xml"))
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+
+    found = sorted(os.listdir(extract_dir))[:15] or ["(empty)"]
+    raise FileNotFoundError(
+        "course.xml not found in the archive.\n"
+        f"  Looked in: {extract_dir}, {conventional}, and one level down.\n"
+        f"  Top level actually contains: {', '.join(found)}\n"
+        "  Expected an Open edX archive with course.xml at its root or inside a "
+        "single top-level directory."
+    )
 
 
 def extract_and_parse(tar_path: str, extract_dir: str):
@@ -26,19 +83,29 @@ def extract_and_parse(tar_path: str, extract_dir: str):
         os.makedirs(extract_dir)
 
     print(f"Extracting {tar_path} to {extract_dir}...")
-    with tarfile.open(tar_path, "r:gz") as tar:
-        safe_extract(tar, extract_dir)
+    try:
+        with tarfile.open(tar_path, "r:gz") as tar:
+            safe_extract(tar, extract_dir)
+    except RuntimeError as exc:
+        print(f"Error: {exc}")
+        print("The archive contains an entry that would write outside the extract "
+              "directory. Extraction aborted; nothing was unpacked.")
+        sys.exit(1)
 
     course_data = {"chapters": []}
 
-    course_root_xml = os.path.join(extract_dir, "course", "course.xml")
-    if not os.path.exists(course_root_xml):
-        print("Error: course.xml not found in extracted archive.")
+    try:
+        course_root = find_course_root(extract_dir)
+    except FileNotFoundError as exc:
+        print(f"Error: {exc}")
         sys.exit(1)
 
-    tree = ET.parse(course_root_xml)
+    if course_root != os.path.join(extract_dir, "course"):
+        print(f"[INFO] Course root: {course_root}")
+
+    tree = ET.parse(os.path.join(course_root, "course.xml"))
     course_url_name = tree.getroot().get("url_name")
-    course_file = os.path.join(extract_dir, "course", "course", f"{course_url_name}.xml")
+    course_file = os.path.join(course_root, "course", f"{course_url_name}.xml")
 
     if not os.path.exists(course_file):
         print(f"Error: Course file {course_file} not found.")
@@ -47,7 +114,7 @@ def extract_and_parse(tar_path: str, extract_dir: str):
     course_tree = ET.parse(course_file)
     for chapter in course_tree.getroot().findall("chapter"):
         ch_url_name = chapter.get("url_name")
-        ch_file = os.path.join(extract_dir, "course", "chapter", f"{ch_url_name}.xml")
+        ch_file = os.path.join(course_root, "chapter", f"{ch_url_name}.xml")
 
         chapter_obj = {"title": ch_url_name, "sequentials": []}
 
@@ -57,7 +124,7 @@ def extract_and_parse(tar_path: str, extract_dir: str):
 
             for seq in ch_tree.getroot().findall("sequential"):
                 seq_url_name = seq.get("url_name")
-                seq_file = os.path.join(extract_dir, "course", "sequential", f"{seq_url_name}.xml")
+                seq_file = os.path.join(course_root, "sequential", f"{seq_url_name}.xml")
 
                 seq_obj = {"title": seq_url_name, "verticals": []}
                 if os.path.exists(seq_file):
@@ -66,7 +133,7 @@ def extract_and_parse(tar_path: str, extract_dir: str):
 
                     for vert in seq_tree.getroot().findall("vertical"):
                         vert_url_name = vert.get("url_name")
-                        vert_file = os.path.join(extract_dir, "course", "vertical", f"{vert_url_name}.xml")
+                        vert_file = os.path.join(course_root, "vertical", f"{vert_url_name}.xml")
 
                         vert_obj = {"components": [], "title": vert.get("url_name", "")}
                         if os.path.exists(vert_file):

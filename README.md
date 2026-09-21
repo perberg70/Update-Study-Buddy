@@ -173,6 +173,7 @@ everything), so a working export removes the need for routine deduplication.
 - **Files are verified to exist** before anything is deleted.
 - **The review pause prints the actual delete list** before asking you to press Enter.
 - **Notebook URL:** NotebookLM is now "Gemini Notebook" at `notebook.google.com`. `config.py` points there; `notebooklm.google.com` still redirects. Override with `NOTEBOOKLM_PROJECT_URL`.
+- **Archive layout:** `extract_edx.py` accepts either shape of Open edX archive — `course.xml` at the archive root (what an import archive built for upload contains), or wrapped in a single top-level directory (what a Studio export produces, named after the course run). If it finds neither it lists what the archive actually contains rather than just naming the missing file.
 
 ---
 
