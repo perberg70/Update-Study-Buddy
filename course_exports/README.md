@@ -24,6 +24,14 @@ To keep an old one, move it out of this folder, or name the one you want:
 python start_run.py --tar "course_exports/course.hp_m6v88.tar.gz"
 ```
 
+## Not edXUpdater's archive
+
+`edXUpdater` builds an archive named exactly `course.tar.gz` and uploads it **to** edX to
+update the course home page. This project reads an export pulled **from** edX Studio —
+the other direction, a different tree. Its archive is a valid OLX course, so dropped in
+here it would be used without complaint; `start_run.py` warns when it sees that filename,
+but keeping it out of this folder is the real safeguard.
+
 ## Nothing here is committed
 
 `*.tar.gz` is in `.gitignore`, so exports stay out of git. This README is the only

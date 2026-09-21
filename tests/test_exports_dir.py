@@ -30,6 +30,11 @@ def check(failures, cond, msg):
         failures.append(msg)
 
 
+def exports_dir_files(exports):
+    return [os.path.join(exports, n) for n in os.listdir(exports)
+            if n.endswith(".tar.gz")]
+
+
 def reload_config(project, exports):
     """config reads its directories at import time, so rebind them."""
     config.PROJECT_DIR = Path(project)
@@ -39,6 +44,21 @@ def reload_config(project, exports):
 
 def main():
     failures = []
+
+    # edXUpdater builds an import archive named exactly course.tar.gz, which
+    # course*.tar.gz matches and CourseArchive accepts - so it would be used to
+    # build study material from the wrong tree, silently.
+    for name, expect_warning, why in [
+        ("course.tar.gz", True, "edXUpdater's exact output name"),
+        ("COURSE.TAR.GZ", True, "case must not evade it"),
+        ("course.hp_m6v88.tar.gz", False, "a Studio export carries a run id"),
+        ("course.6gehwzol.tar.gz", False, "another real export name"),
+        ("courses.tar.gz", False, "a different name entirely"),
+        (os.path.join("a", "b", "course.tar.gz"), True, "matched on basename"),
+    ]:
+        got = bool(config.looks_like_import_archive(name))
+        check(failures, got == expect_warning,
+              f"looks_like_import_archive({name!r}): {why}")
     with tempfile.TemporaryDirectory() as base:
         project = os.path.join(base, "proj")
         exports = os.path.join(project, "course_exports")
@@ -86,6 +106,18 @@ def main():
                     if want not in str(exc):
                         failures.append(f"the refusal should name {want}: {exc}")
 
+            # A bare course.tar.gz warns but must remain usable: the name is
+            # evidence, not proof, and an export may have been renamed.
+            for stale in exports_dir_files(exports):
+                os.remove(stale)
+            imported = make_archive(os.path.join(exports, "course.tar.gz"), COURSE)
+            check(failures, os.path.samefile(cfg.resolve_tar_path(), imported),
+                  "a bare course.tar.gz must still resolve, not be refused")
+            check(failures, bool(cfg.looks_like_import_archive(imported)),
+                  "...but it must be flagged")
+            os.remove(imported)
+            good = make_archive(os.path.join(exports, "course.good.tar.gz"), COURSE)
+
             # Naming one explicitly always wins.
             check(failures, cfg.resolve_tar_path(stray) == stray,
                   "an explicit path should be returned unchanged")
@@ -107,6 +139,7 @@ def main():
         print("  [PASS] course_exports/ wins; a stray elsewhere is reported, not used")
         print("  [PASS] two in one folder refuses and names both")
         print("  [PASS] --tar and EDX_TAR_PATH override the search")
+        print("  [PASS] edXUpdater's course.tar.gz is flagged but still usable")
     return not failures
 
 

@@ -24,7 +24,7 @@ import subprocess
 import sys
 
 from config import (COURSE_STRUCTURE_PATH, EXPORTS_DIR, describe_export,
-                    find_exports)
+                    find_exports, looks_like_import_archive)
 from olx_archive import CourseArchive, CourseArchiveError
 
 RULE = "=" * 70
@@ -82,6 +82,16 @@ def locate_export(explicit_tar):
     path = here[0]
     print(f"[OK] Found one export in {chosen}")
     print(f"     {describe_export(path)}")
+
+    reason = looks_like_import_archive(path)
+    if reason:
+        print("\n[WARN] This looks like an edXUpdater import archive, not a course")
+        print(f"       export - {reason}.")
+        print("       That archive is built to upload TO edX (it updates the course")
+        print("       home page). This tool reads an export pulled FROM edX Studio:")
+        print("       Tools -> Export. They are different trees, and building study")
+        print("       material from the wrong one is hard to spot afterwards.")
+        print("       If that is what you meant, carry on; otherwise re-export.")
 
     # An archive somewhere else is not used, and must not be silently ignored.
     if elsewhere:

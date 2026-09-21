@@ -4,11 +4,43 @@ Automates updating a **Google NotebookLM** notebook from an **edX course export*
 
 ---
 
+## Quick start
+
+1. Export the course from edX Studio: **Tools → Export → Export Course Content**.
+2. Put the resulting `course.<run-id>.tar.gz` in **`course_exports/`**.
+3. From the project folder:
+
+```powershell
+python start_run.py
+```
+
+It finds the export, confirms it really is a course archive, records which one it read,
+lists the modules, and prints the commands to run next. Run it at the start of every
+update: the two questions that have caused the most trouble here are *where does the
+export go* and *which one is being read*, and this answers both before any work happens.
+
+```powershell
+pip install -r requirements.txt   # first time
+python preflight.py               # checks Python, ffmpeg, packages, branch, export
+```
+
+---
+
 ## Purpose
 
 - **Input:** An edX course export (`.tar.gz`) and your existing NotebookLM notebook.
-- **Output:** The same notebook with old sources removed and new sources added (by chapter: merged text files, MP3s from videos, optional PDFs from static assets).
-- **Use case:** When the course is re-run or content changes, one command refreshes the notebook instead of manually re-uploading and cleaning up.
+- **Output:** either
+  - **module PDFs** — one structured PDF per module, units and subunits as headings, with
+    prose and video transcripts inline; or
+  - **a synced notebook** — old sources removed and new ones added, by chapter: merged
+    text files and MP3s from videos.
+- **Use case:** when the course is re-run or content changes, refresh the study material
+  instead of re-uploading and cleaning up by hand.
+
+**Static assets are not uploaded.** `organize_content.py` copies PDFs/DOCX/XLSX from the
+course into `Organized_Course_Content/Global_Assets/`, but nothing adds them to the
+manifest, so they never reach the notebook. Copy them across by hand if you want them
+there. (Known gap, not yet fixed.)
 
 ---
 
@@ -55,10 +87,20 @@ If any step fails (non-zero exit), the pipeline stops.
 
 ## Prerequisites
 
-- **Python 3** with packages: `playwright` (and Chromium/Chrome for automation).
-- **Chrome** installed (used for NotebookLM via remote debugging).
-- **ffmpeg** on `PATH` (used by `organize_content.py` to convert video to MP3).
-- **edX course export** `.tar.gz` in the project folder (see "Input files" below).
+- **Python 3.9+**, then `pip install -r requirements.txt`.
+- **ffmpeg** on `PATH` — converts video to MP3 and to the audio transcription reads.
+- **Chrome** — only for the notebook-sync half, via remote debugging.
+- **An edX course export** in `course_exports/` (see Quick start).
+
+Three packages are optional, each enabling one feature. `python preflight.py` reports
+which are installed and what each does:
+
+| Package | Enables |
+|---|---|
+| `playwright` | anything that drives the notebook (export / delete / upload) |
+| `reportlab` | module PDFs |
+| `youtube-transcript-api` | captions for YouTube-hosted videos |
+| `faster-whisper` | local transcription of short videos |
 
 ---
 
@@ -74,7 +116,8 @@ In that Chrome window, sign in to the Google account you use for NotebookLM.
 
 ### Full update (recommended)
 
-1. Put your edX course export in the project folder (`course*.tar.gz`), or set `EDX_TAR_PATH`.
+1. Put your edX course export in `course_exports/` and run `python start_run.py`
+   (see Quick start). Or name one with `--tar`, or set `EDX_TAR_PATH`.
 2. (Optional but recommended) run preflight checks:
 
 ```powershell
@@ -90,20 +133,49 @@ python run_full_update.py
 4. The pipeline runs Phase 1, then pauses for you to review `comparison_review.json`.
 5. Edit actions as needed, save, press Enter. Phase 2 runs the deletions and uploads.
 
-### Run individual steps
+### Command reference
 
+**Start a run**
+
+- `python start_run.py` — find the export, parse it, print what to do next. Start here.
+- `python preflight.py` — Python, ffmpeg, packages, git branch, and whether the export reads.
+- `python extract_edx.py --tar <file>` — parse one archive into `course_structure.json`.
+  With no `--tar` it uses the only export it finds, and **refuses if there are two**.
+
+**Build a module PDF**
+
+- `python tools/build_module_pdf.py --list` — list the modules.
+- `python tools/fetch_youtube_transcripts.py --module 1` — captions for YouTube videos.
+- `python tools/transcribe_videos.py --module 1 --dry-run` — what local transcription
+  would do, and roughly how long. Then drop `--dry-run` to run it.
+- `python tools/build_module_pdf.py --module 1` — build `Module_1.pdf`.
+
+**Sync the notebook** (needs Chrome on 9222)
+
+- `python run_full_update.py` — the whole pipeline with a review pause.
 - `python export_current_sources.py` — refresh `current_sources.json` only.
-- `python delete_agent.py --dedupe-current --dry-run` — **list** which titles appear more than once. Safe and useful.
-- `python delete_agent.py --dedupe-current` — **refuses to run.** See "Deduplication is retired" below.
-- `python delete_agent.py --fuzzy` — match sources on shared words instead of exact titles. **Unsafe.** On a real 144-source notebook this made 78% of titles match some *other* source, because chapter-prefixed filenames share most of their words. Only with `--dry-run` first.
-- `python extract_edx.py` — parse the newest `course*.tar.gz` (or pass `--tar <file> --out <path>`).
-- `python organize_content.py` — build organized content and manifest, from the archive `extract_edx.py` recorded (or pass `--tar`).
-- `python tools/which_archive.py` — show which archives are present and which one the pipeline is reading.
 - `python compare_sources.py` — generate `comparison_review.json` for review.
-- `python compare_sources.py --apply` — apply the reviewed plan (delete + upload).
-- `python delete_agent.py` — delete sources per `comparison_review.json`.
-- `python delete_agent.py --dry-run` — preview exactly which names are interpreted as delete targets (pairs + current_only) before automation.
-- `python upload_agent.py` — upload sources per `comparison_review.json` (or full manifest).
+- `python compare_sources.py --apply` — apply the reviewed plan (upload, then delete).
+- `python organize_content.py` — build organized content and the manifest.
+- `python upload_agent.py` — upload per `comparison_review.json` (or the full manifest).
+- `python delete_agent.py --dry-run` — preview exactly which names are delete targets.
+- `python delete_agent.py` — delete per `comparison_review.json`. **Exact titles only.**
+- `python delete_agent.py --fuzzy` — match on shared words instead. **Unsafe:** on a real
+  144-source notebook this made 78% of titles match some *other* source, because
+  chapter-prefixed filenames share most of their words. `--dry-run` first, always.
+- `python delete_agent.py --dedupe-current --dry-run` — **list** repeated titles. Safe.
+- `python delete_agent.py --dedupe-current` — **refuses.** See "Deduplication is retired".
+
+**Diagnose**
+
+- `python tools/which_archive.py` — which archives exist, and which one is in use.
+- `python tools/find_text.py "<phrase>"` — trace text in a PDF back to its component, and
+  say why the course page might not show it.
+- `python tools/video_report.py --module 1 --verbose` — every video, its duration, and
+  whether a transcript exists.
+- `python tools/preview_names.py` — what `organize_content.py` would name things, scored
+  against the notebook's current sources, without downloading anything.
+- `python tools/check_conflict_markers.py` — pre-commit check for conflict markers.
 
 ---
 
@@ -111,25 +183,40 @@ python run_full_update.py
 
 ```
 Update Study Buddy/
-├── run_full_update.py            # Main entry: export, compare, review, apply
-├── export_current_sources.py     # Step 0/2: scrape NotebookLM Sources → current_sources.json
-├── delete_agent.py               # Delete sources during apply; --dedupe-current is opt-in, not automatic
-├── notebooklm_client.py          # Shared CDP connection + tab selection
-├── extract_edx.py                # Step 3: parse .tar.gz (no unpacking) → course_structure.json
+├── start_run.py                  # Start here: find the export, parse it, say what is next
+├── preflight.py                  # Environment, packages, git branch, export readability
+├── run_full_update.py            # Notebook sync: export, compare, review, apply
+│
+├── config.py                     # Paths, URLs, limits, where the export is looked for
 ├── olx_archive.py                # Reads the OLX tree straight out of the .tar.gz
-├── organize_content.py           # Step 4: build Organized_Course_Content/ + processing_manifest.json
-├── compare_sources.py            # Step 5: compare & match → comparison_review.json; --apply executes Step 6-7
-├── upload_agent.py               # Step 7: upload sources (REPLACE / ADD) to NotebookLM
+├── extract_edx.py                # Parse .tar.gz (no unpacking) → course_structure.json
+├── organize_content.py           # Build Organized_Course_Content/ + processing_manifest.json
+├── compare_sources.py            # Compare & match → comparison_review.json; --apply runs it
+├── export_current_sources.py     # Scrape the notebook's Sources panel → current_sources.json
+├── delete_agent.py               # Delete sources; exact titles by default, --fuzzy is opt-in
+├── upload_agent.py               # Upload sources (REPLACE / ADD)
+├── notebooklm_client.py          # Shared CDP connection + tab selection
 │
-├── current_sources.json          # Current source names in the notebook (from export)
-├── course_structure.json         # Course structure tree (from extract)
-├── processing_manifest.json      # Files per chapter: { name, path, type } (from organize)
-├── comparison_review.json        # Review plan: pairs + current_only + new_only with actions
+├── course_exports/               # >>> Put your edX .tar.gz here <<<
+├── transcripts/                  # <video url_name>.txt — from OLX, YouTube, Teams or Whisper
+├── Organized_Course_Content/     # Chapter folders with .txt and .mp3, and the module PDFs
 │
-├── Organized_Course_Content/     # Chapter folders with .txt and .mp3 (from organize)
+├── course_structure.json         # Parsed course tree + which archive it came from
+├── processing_manifest.json      # Files per chapter: { name, path, type }
+├── current_sources.json          # Source names currently in the notebook
+├── comparison_review.json        # Review plan: pairs + current_only + new_only
 │
-├── course.*.tar.gz               # Your edX export
-├── preflight.py                  # Optional environment/input validation
+├── tools/
+│   ├── build_module_pdf.py       # One structured PDF per module
+│   ├── transcribe_videos.py      # Local Whisper for the short videos
+│   ├── fetch_youtube_transcripts.py
+│   ├── which_archive.py          # Which archive is in use, and is it unchanged
+│   ├── find_text.py              # Trace a phrase back to its course component
+│   ├── video_report.py           # Every video: duration, transcript, visibility
+│   ├── preview_names.py          # Predicted names scored against the notebook
+│   └── check_conflict_markers.py
+├── tests/                        # python tests/test_*.py — no framework needed
+├── requirements.txt
 └── README.md                     # This file
 ```
 
@@ -162,21 +249,42 @@ everything), so a working export removes the need for routine deduplication.
 
 ### Where the course export goes
 
-Put the `.tar.gz` from edX Studio (**Tools → Export**) in `course_exports/`, then:
-
-```powershell
-python start_run.py
-```
-
-It finds the export, confirms it really is a course archive, records which one it read,
-and prints the commands to run next. Run it at the start of every update — the two
-questions that have caused the most trouble here are *where does the export go* and
-*which one is being read*, and this answers both before any work happens.
+`course_exports/` — see Quick start. This is how it is found, in detail.
 
 Search order: `--tar`, then `EDX_TAR_PATH`, then the first of `course_exports/`, the
-project folder and the working directory that holds a `course*.tar.gz`. **Two in the same
-folder and no `--tar` refuses and lists both** rather than choosing. An archive in a
-lower-priority location is reported as ignored, never silently passed over.
+project folder and the working directory that holds a `course*.tar.gz`. The first
+directory with a match wins, so `course_exports/` is authoritative once in use, and an
+archive already sitting in the project folder keeps working.
+
+**Two in the same folder and no `--tar` refuses and lists both** rather than choosing.
+Choosing by date is not safe here: OneDrive rewrites modification times on sync, so the
+newest file is not the newest export. An archive in a lower-priority location is reported
+as ignored, never silently passed over.
+
+### edXUpdater is a different tool, going the other way
+
+`edXUpdater` is a separate repository that **builds** an Open edX *import* archive and
+uploads it **to** edX, to update the course home page. This project **reads** a Studio
+*export* pulled **from** edX. Opposite directions, different trees, and nothing here
+calls anything there.
+
+They collide by filename. `New-EdxImportArchive.ps1` produces the exact name
+`course.tar.gz`, which `course*.tar.gz` matches, and it puts `course.xml` at the archive
+root — which is a layout this project accepts. So dropped into `course_exports/` it would
+be found, parsed and used to build study material from the wrong tree, without complaint.
+
+`start_run.py` and `preflight.py` therefore flag an archive named exactly
+`course.tar.gz`:
+
+```
+[WARN] This looks like an edXUpdater import archive, not a course
+       export - named exactly course.tar.gz.
+```
+
+A warning, not a refusal — the name is strong evidence, not proof, and an export may have
+been renamed. A Studio export carries a run id: `course.hp_m6v88.tar.gz`.
+
+**Keep edXUpdater's output out of `course_exports/`.**
 
 ### Which archive did this come from?
 
@@ -351,9 +459,15 @@ unattended run:
 - **Merge conflict after pull/rebase** — run `git add --renormalize .` once after pulling this change, then commit. For real conflicts: `git status`, edit conflict blocks, `git add <file>`, then continue with `git rebase --continue` or complete the merge commit.
 - **"CDP connection failed"** — Start Chrome with `--remote-debugging-port=9222` and run the script again.
 - **"current_sources.json not found"** — Run `export_current_sources.py` first (with Chrome on 9222).
-- **"No edX export found"** — Place `course*.tar.gz` in the project folder, pass `--tar <file>`, or set `EDX_TAR_PATH`.
-- **"course_structure.json not found"** — Run `extract_edx.py` before `organize_content.py`.
+- **"No edX export found"** — Put the `.tar.gz` in `course_exports/` and run `python start_run.py`. Or pass `--tar <file>`, or set `EDX_TAR_PATH`.
+- **"N course archives ... and none was named"** — Two exports in one folder. Keep one, or name it: `--tar "<file>"`. It will not choose by date: OneDrive rewrites modification times on sync, so the newest file is not the newest export.
+- **"course_structure.json records no source archive"** — The structure predates provenance tracking, or came from a different export. Re-run `python extract_edx.py --tar "<file>"`. `--allow-stale` overrides, leaving provenance unverified.
+- **"This looks like an edXUpdater import archive"** — See "edXUpdater is a different tool" above.
+- **"course_structure.json not found"** — Run `extract_edx.py` (or `start_run.py`) first.
+- **`OMP: Error #15` / the process dies during transcription** — Two OpenMP runtimes. `transcribe_videos.py` sets `KMP_DUPLICATE_LIB_OK=TRUE` for its own run; if it still aborts, `set KMP_DUPLICATE_LIB_OK=TRUE` in the shell first.
+- **`ModuleNotFoundError` from a tool** — Run `python preflight.py`; it names every optional package and its `pip install`.
 - **Uploads fail or wrong account** — Use Chrome with remote debugging and the correct Google account.
 - **Large files skipped** — Check `MAX_UPLOAD_SIZE_MB` / `ENFORCE_UPLOAD_SIZE_LIMIT` in `config.py` (or env vars).
-- **Duplicates remain after delete** — run `python delete_agent.py --dry-run` first and confirm planned names. The delete matcher now uses token/fuzzy matching for truncated UI labels; if names still miss, copy exact source titles from NotebookLM into `comparison_review.json`.
+- **Duplicates remain after delete** — run `python delete_agent.py --dry-run` first and confirm the planned names. The matcher requires an **exact** normalised title by default; if a name misses, copy the exact source title from the notebook into `comparison_review.json`. `--fuzzy` exists but is unsafe (see the command reference).
+- **The module PDF is not where I expected** — `Organized_Course_Content/Module_<n>.pdf`, or wherever `--out-dir` points.
 - **Pre-merge check** — run `python tools/check_conflict_markers.py` before commit/PR to ensure no `<<<<<<<`, `=======`, `>>>>>>>` markers remain.

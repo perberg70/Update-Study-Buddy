@@ -10,7 +10,7 @@ import socket
 import subprocess
 import sys
 
-from config import CDP_URL, resolve_tar_path
+from config import CDP_URL, looks_like_import_archive, resolve_tar_path
 
 # olx_archive is imported inside check_tarball, not here. On a checkout that
 # predates it - main, say - a module-scope import raises ModuleNotFoundError
@@ -169,6 +169,12 @@ def check_tarball() -> bool:
     print(f"[OK] edX export readable: {path}")
     print(f"     sha:{fingerprint['sha256_head']}, course root: "
           f"{fingerprint['course_root']}, {fingerprint['files_in_archive']} file(s)")
+
+    reason = looks_like_import_archive(path)
+    if reason:
+        print(f"     [!] {reason}.")
+        print("         An import archive is uploaded TO edX; this tool reads an")
+        print("         export FROM edX Studio. Check this is the file you meant.")
     return True
 
 

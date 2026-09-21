@@ -141,6 +141,31 @@ def find_exports() -> tuple:
     return chosen, here, elsewhere
 
 
+# edXUpdater is a separate, governed repository that builds an Open edX *import*
+# archive - the thing you upload TO edX to update the course home page. This
+# project reads an *export* pulled FROM edX Studio. Opposite directions, and
+# they collide by name: its output is the exact filename course.tar.gz, which
+# course*.tar.gz matches, and it has course.xml at the archive root, which
+# CourseArchive accepts. So it would be found, parsed and silently used to build
+# study material from the wrong tree.
+#
+# The filename is the discriminator: a Studio export carries a run id
+# (course.hp_m6v88.tar.gz), an import archive does not.
+IMPORT_ARCHIVE_NAME = "course.tar.gz"
+
+
+def looks_like_import_archive(path) -> str:
+    """Why this file looks like edXUpdater's output rather than a Studio export.
+
+    A warning, never a refusal: the name is strong evidence, not proof, and an
+    export may legitimately have been renamed.
+    """
+    if Path(path).name.lower() != IMPORT_ARCHIVE_NAME:
+        return ""
+    return (f"named exactly {IMPORT_ARCHIVE_NAME}, which is what edXUpdater's "
+            "New-EdxImportArchive.ps1 produces")
+
+
 def describe_export(path: Path) -> str:
     return (f"{path.name}  ({path.stat().st_size / 1048576:.1f} MB, "
             f"modified {_mtime(path)})")
