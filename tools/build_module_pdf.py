@@ -36,6 +36,60 @@ from olx_archive import (CourseArchiveError, describe_source,  # noqa: E402
 
 MODULE_NUMBER_RE = re.compile(r"^\s*(\d+)")
 NO_TRANSCRIPT = "[no transcript in export]"
+NO_TRANSCRIPT_STALE = ("[transcript ignored: it was generated from a different "
+                       "video or export - re-run the transcript tools]")
+
+
+YOUTUBE_ATTRS = ("youtube_id_1_0", "youtube_id", "youtube")
+
+
+def youtube_id(video_root):
+    """YouTube id from a <video> element, or ''.
+
+    The `youtube` attribute can list several playback speeds,
+    "0.75:abc,1.00:def,1.25:ghi", so the 1.00 entry is preferred rather than
+    whatever happens to be last.
+    """
+    for attr in YOUTUBE_ATTRS:
+        value = (video_root.get(attr) or "").strip()
+        if not value:
+            continue
+        pairs = [p.strip() for p in value.split(",") if p.strip()]
+        for pair in pairs:
+            if ":" in pair:
+                speed, vid = pair.split(":", 1)
+                if speed.strip().startswith("1.0") or speed.strip() == "1":
+                    return vid.strip()
+        first = pairs[0] if pairs else value
+        return first.split(":", 1)[-1].strip() if ":" in first else first
+
+    for asset in video_root.findall(".//encoded_video"):
+        url = asset.get("url") or ""
+        if "youtu" in url:
+            tail = url.split("?", 1)
+            if len(tail) > 1 and "v=" in tail[1]:
+                return tail[1].split("v=", 1)[1].split("&")[0]
+            return tail[0].rsplit("/", 1)[-1]
+    return ""
+
+
+def video_source_id(video_root):
+    """What a transcript for this video was made from: a YouTube id or an mp4.
+
+    Must agree exactly with what the generators record. youtube_id() lives
+    here rather than in video_report.py precisely so there is one parse: the
+    first version of this read the raw attribute, while
+    fetch_youtube_transcripts.py recorded the parsed id, so every fetched
+    caption was judged stale the moment it was written.
+    """
+    parsed = youtube_id(video_root)
+    if parsed:
+        return parsed
+    for asset in video_root.findall(".//video_asset/encoded_video"):
+        url = asset.get("url") or ""
+        if url.endswith(".mp4"):
+            return url
+    return ""
 
 # Text hidden from sighted users but left for screen readers. It is real
 # content and correct markup, but it is not what the course page shows - and a
@@ -325,6 +379,52 @@ def transcript_text(raw, name=""):
     return " ".join(part for part in out if part)
 
 
+# Provenance for transcripts this project generated, so a video that is
+# re-recorded but keeps its url_name does not silently keep last year's speech.
+# Same failure the audio cache had, in the other half of the pipeline.
+TRANSCRIPT_INDEX_NAME = ".sources.json"
+
+
+def transcript_index_path(transcripts_dir):
+    return os.path.join(transcripts_dir or ".", TRANSCRIPT_INDEX_NAME)
+
+
+def load_transcript_index(transcripts_dir):
+    try:
+        with open(transcript_index_path(transcripts_dir), encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def record_transcript(transcripts_dir, url_name, origin, source_id, archive_sha):
+    """Note what produced a generated transcript, and save immediately."""
+    index = load_transcript_index(transcripts_dir)
+    index[url_name] = {"origin": origin, "source": source_id, "archive": archive_sha}
+    try:
+        with open(transcript_index_path(transcripts_dir), "w", encoding="utf-8") as fh:
+            json.dump(index, fh, indent=2, sort_keys=True)
+    except OSError as exc:
+        print(f"[WARN] Could not record transcript provenance: {exc}")
+
+
+def transcript_is_stale(transcripts_dir, url_name, source_id, archive_sha):
+    """True when a *generated* transcript no longer matches its video.
+
+    A file with no recorded provenance was put there by hand - a Teams export,
+    typically - and is always trusted: the person dropping it in is the
+    authority on what it belongs to.
+    """
+    entry = load_transcript_index(transcripts_dir).get(url_name)
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("source") and source_id and entry["source"] != source_id:
+        return True
+    return bool(entry.get("archive") and archive_sha
+                and entry["archive"] != archive_sha)
+
+
 def stored_transcript(url_name, title, transcripts_dir):
     """A transcript dropped into the store, by url_name or by slugified title.
 
@@ -373,6 +473,14 @@ def video_entry(url_name, vertical_title, archive, stats, transcripts_dir=None):
 
     text = stored_transcript(url_name, title, transcripts_dir)
     if text:
+        # Generated transcripts are only reused while they still match the
+        # video they were made from. Hand-dropped ones carry no provenance and
+        # are always trusted.
+        source_id = video_source_id(root)
+        if transcript_is_stale(transcripts_dir, url_name, source_id,
+                               archive.fingerprint()["sha256"]):
+            stats["stale_transcripts"] = stats.get("stale_transcripts", 0) + 1
+            return title, NO_TRANSCRIPT_STALE
         stats["transcripts"] += 1
         stats["from_store"] += 1
         return title, text
@@ -641,7 +749,8 @@ def main() -> int:
 
     stats = {"units": 0, "subunits": 0, "html": 0, "videos": 0, "transcripts": 0,
              "from_olx": 0, "from_store": 0, "video_missing": 0, "skipped": {},
-             "hidden_nodes": [], "hidden_text_components": 0, "hidden_chars": 0}
+             "hidden_nodes": [], "hidden_text_components": 0, "hidden_chars": 0,
+             "stale_transcripts": 0}
     story = module_story(module, archive, styles, stats, unicode_ok=bool(fonts),
                          transcripts_dir=args.transcripts_dir,
                          include_hidden=args.include_hidden)
@@ -663,6 +772,12 @@ def main() -> int:
         detail = f" ({', '.join(sources)})" if sources else ""
         print(f"     videos: {stats['videos']}, with transcript: {stats['transcripts']}"
               f"{detail}, unreadable xml: {stats['video_missing']}")
+        if stats.get("stale_transcripts"):
+            print(f"     [WARN] {stats['stale_transcripts']} stored transcript(s) "
+                  "ignored: generated from a")
+            print("            different video or export. Re-run "
+                  "fetch_youtube_transcripts.py /")
+            print("            transcribe_videos.py to refresh them.")
         if stats["videos"] and not stats["transcripts"]:
             print("     [WARN] No transcripts found. Drop them into "
                   f"{args.transcripts_dir}/ named")

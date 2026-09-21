@@ -39,7 +39,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import COURSE_STRUCTURE_PATH, TRANSCRIPTS_DIR  # noqa: E402
 from olx_archive import CourseArchiveError, open_for_structure  # noqa: E402
 from build_module_pdf import (group_modules, module_label,  # noqa: E402
-                              stored_transcript, transcript_candidates)
+                              record_transcript, stored_transcript,
+                              transcript_candidates, transcript_is_stale)
 from video_report import has_direct_mp4, parse_duration, youtube_id  # noqa: E402
 from organize_content import download_with_retry, human_size  # noqa: E402
 
@@ -60,7 +61,8 @@ def direct_mp4(video_root):
     return ""
 
 
-def plan(modules, archive, transcripts_dir, max_minutes, force=False):
+def plan(modules, archive, transcripts_dir, max_minutes, force=False,
+         archive_sha=""):
     """One row per video, each with a decision and the reason for it."""
     rows = []
     for module in modules:
@@ -77,11 +79,12 @@ def plan(modules, archive, transcripts_dir, max_minutes, force=False):
                         if comp.get("type") != "video":
                             continue
                         rows.append(_classify(comp, vert, archive, transcripts_dir,
-                                              max_minutes, force))
+                                              max_minutes, force, archive_sha))
     return rows
 
 
-def _classify(comp, vert, archive, transcripts_dir, max_minutes, force):
+def _classify(comp, vert, archive, transcripts_dir, max_minutes, force,
+              archive_sha=""):
     url_name = comp.get("url_name")
     row = {"url_name": url_name, "title": url_name, "duration": 0.0,
            "url": "", "do": False, "why": ""}
@@ -105,7 +108,13 @@ def _classify(comp, vert, archive, transcripts_dir, max_minutes, force):
         for candidate in transcript_candidates(root, archive):
             existing = existing or f"transcript in the export ({candidate})"
         if not existing and stored_transcript(url_name, row["title"], transcripts_dir):
-            existing = f"transcript already in {transcripts_dir}/"
+            # Only counts as done while it still matches this video and export.
+            if transcript_is_stale(transcripts_dir, url_name,
+                                   direct_mp4(root), archive_sha):
+                existing = ""
+                row["why"] = "existing transcript is from another video or export"
+            else:
+                existing = f"transcript already in {transcripts_dir}/"
     if existing:
         row["why"] = existing
         return row
@@ -248,7 +257,9 @@ def main() -> int:
         print(f"[FAIL] {exc}")
         return 1
 
-    rows = plan(modules, archive, args.transcripts_dir, args.max_minutes, args.force)
+    archive_sha = archive.fingerprint()["sha256"]
+    rows = plan(modules, archive, args.transcripts_dir, args.max_minutes,
+                args.force, archive_sha)
     todo = [r for r in rows if r["do"]]
     skipped = [r for r in rows if not r["do"]]
 
@@ -314,6 +325,8 @@ def main() -> int:
                 continue
             with open(out, "w", encoding="utf-8") as fh:
                 fh.write(text.strip())
+            record_transcript(args.transcripts_dir, row["url_name"], "whisper",
+                              row["url"], archive_sha)
             done += 1
             print(f"    [OK] {len(text.split())} words in {hhmm(time.time() - started)}"
                   f" -> {out}")

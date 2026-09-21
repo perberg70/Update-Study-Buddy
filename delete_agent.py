@@ -39,6 +39,12 @@ def _canonical_name(name: str) -> str:
     return re.sub(r"\s+", " ", name).strip().lower()
 
 
+# Upper bound on delete attempts per exact-match name. Not a count of copies:
+# the count cannot see offscreen rows, so the loop stops when the scrolling
+# search reports no match. This only stops a pathological loop.
+DELETE_SCAN_LIMIT = 25
+
+
 def get_sources_to_remove():
     """Collect source names to delete from comparison_review.json (deduplicated)."""
     if not os.path.exists(REVIEW_PATH):
@@ -478,9 +484,23 @@ def _execute_deletion_plan(plan, dry_run: bool = False, fuzzy: bool = False):
                     print(f"   [INFO] {source_name}: observed {observed} copy/copies, deleting {max_deletions}.")
 
             if max_deletions is None:
-                # Bound by what is actually present rather than an arbitrary 10,
-                # so a single over-broad name cannot cascade into other sources.
-                max_deletions = count_source_occurrences(page, source_name, fuzzy=fuzzy)
+                observed = count_source_occurrences(page, source_name, fuzzy=fuzzy)
+                if fuzzy:
+                    # Fuzzy can match unrelated rows, so never exceed what was
+                    # actually seen: an over-broad name must not cascade.
+                    max_deletions = observed
+                else:
+                    # count_source_occurrences reads the rendered DOM only, and
+                    # returns 0 on any error. The panel is virtualized - that is
+                    # why find_more_button_with_scroll exists - so a row merely
+                    # scrolled out of view counts 0, and capping the loop there
+                    # would skip a deletion that delete_one_source would have
+                    # found. Exact matching cannot cascade, so let its scrolling
+                    # search decide when to stop; the cap is only a runaway guard.
+                    max_deletions = max(observed, DELETE_SCAN_LIMIT)
+                    if not observed:
+                        print(f"   [INFO] {source_name}: not in the rendered panel; "
+                              "searching by scrolling.")
 
             copies = 0
             while copies < max_deletions:
@@ -493,6 +513,9 @@ def _execute_deletion_plan(plan, dry_run: bool = False, fuzzy: bool = False):
                     dismiss_overlays(page)
                     break
 
+            if copies == 0:
+                print(f"   [WARN] {source_name}: nothing deleted - not found in the "
+                      "panel.")
             total_removed += copies
             if copies > 0:
                 extra = f" ({copies} copies)" if copies > 1 else ""

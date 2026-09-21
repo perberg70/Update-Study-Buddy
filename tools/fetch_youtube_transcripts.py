@@ -31,7 +31,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import COURSE_STRUCTURE_PATH, TRANSCRIPTS_DIR  # noqa: E402
 from olx_archive import CourseArchiveError, open_for_structure  # noqa: E402
-from build_module_pdf import group_modules, module_label  # noqa: E402
+from build_module_pdf import (group_modules, module_label,  # noqa: E402
+                              record_transcript, transcript_is_stale)
 from video_report import youtube_id  # noqa: E402
 
 
@@ -141,6 +142,7 @@ def main() -> int:
         print(f"[FAIL] {exc}")
         return 1
 
+    archive_sha = archive.fingerprint()["sha256"]
     videos = youtube_videos(modules, archive)
     if not videos:
         print("No YouTube-hosted videos found.")
@@ -168,10 +170,17 @@ def main() -> int:
             print(f"  {module_label(module)}")
 
         out_path = os.path.join(args.transcripts_dir, f"{url_name}.txt")
-        if os.path.exists(out_path) and not args.force:
+        # "It exists" is not "it is current": a re-recorded video keeps its
+        # url_name, so a transcript from a different video or export must be
+        # refetched rather than counted as done.
+        stale = transcript_is_stale(args.transcripts_dir, url_name,
+                                    video_id, archive_sha)
+        if os.path.exists(out_path) and not args.force and not stale:
             counts["existing"] += 1
             print(f"    [have] {title[:52]}")
             continue
+        if stale:
+            print(f"    [stale] {title[:50]} - refetching")
 
         if args.dry_run:
             print(f"    [would fetch] {title[:44]}  (id {video_id})")
@@ -196,6 +205,8 @@ def main() -> int:
 
         with open(out_path, "w", encoding="utf-8") as fh:
             fh.write(text)
+        record_transcript(args.transcripts_dir, url_name, "youtube",
+                          video_id, archive_sha)
         counts["fetched"] += 1
         print(f"    [ok]   {title[:46]}  ({language}, {kind}, {len(text)} chars)")
 

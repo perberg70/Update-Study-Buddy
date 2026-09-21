@@ -34,10 +34,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import COURSE_STRUCTURE_PATH  # noqa: E402
 from olx_archive import CourseArchiveError, open_course_archive  # noqa: E402
-from build_module_pdf import group_modules, module_label, transcript_candidates  # noqa: E402
-
-YOUTUBE_ATTRS = ("youtube_id_1_0", "youtube_id", "youtube")
-
+from build_module_pdf import (group_modules, module_label,  # noqa: E402
+                              transcript_candidates, youtube_id)
 
 def parse_duration(video_root):
     """Seconds from <video_asset duration=...>, or 0."""
@@ -48,36 +46,6 @@ def parse_duration(video_root):
         return float(asset.get("duration") or 0)
     except (TypeError, ValueError):
         return 0.0
-
-
-def youtube_id(video_root):
-    """YouTube id from a <video> element, or ''.
-
-    The `youtube` attribute can list several playback speeds,
-    "0.75:abc,1.00:def,1.25:ghi", so the 1.00 entry is preferred rather than
-    whatever happens to be last.
-    """
-    for attr in YOUTUBE_ATTRS:
-        value = (video_root.get(attr) or "").strip()
-        if not value:
-            continue
-        pairs = [p.strip() for p in value.split(",") if p.strip()]
-        for pair in pairs:
-            if ":" in pair:
-                speed, vid = pair.split(":", 1)
-                if speed.strip().startswith("1.0") or speed.strip() == "1":
-                    return vid.strip()
-        first = pairs[0] if pairs else value
-        return first.split(":", 1)[-1].strip() if ":" in first else first
-
-    for asset in video_root.findall(".//encoded_video"):
-        url = asset.get("url") or ""
-        if "youtu" in url:
-            tail = url.split("?", 1)
-            if len(tail) > 1 and "v=" in tail[1]:
-                return tail[1].split("v=", 1)[1].split("&")[0]
-            return tail[0].rsplit("/", 1)[-1]
-    return ""
 
 
 def has_direct_mp4(video_root):
