@@ -1,0 +1,28 @@
+# Course exports and extracted content. These are large, and they are the
+# course's data rather than this tool's source.
+*.tar.gz
+edx_export/
+Organized_Course_Content/
+
+# Pipeline state. Regenerated on every run, and current_sources.json holds the
+# notebook's real source titles - the user's data, not this repository's.
+current_sources.json
+course_structure.json
+processing_manifest.json
+comparison_review.json
+
+# Diagnostics, which also capture real source titles.
+export_sources_debug.json
+export_sources_debug.txt
+panel_dump.json
+tar_contents.txt
+
+# Media produced by organize_content.py.
+*.mp3
+*.mp4
+
+# Python.
+__pycache__/
+*.py[cod]
+.venv/
+venv/
