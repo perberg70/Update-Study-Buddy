@@ -176,6 +176,7 @@ python run_full_update.py
   whether a transcript exists.
 - `python tools/preview_names.py` — what `organize_content.py` would name things, scored
   against the notebook's current sources, without downloading anything.
+- `python tests/run_all.py` — run every test file and report which failed.
 - `python tools/check_conflict_markers.py` — pre-commit check for conflict markers.
 
 ---
@@ -216,7 +217,8 @@ Update Study Buddy/
 │   ├── video_report.py           # Every video: duration, transcript, visibility
 │   ├── preview_names.py          # Predicted names scored against the notebook
 │   └── check_conflict_markers.py
-├── tests/                        # python tests/test_*.py — no framework needed
+├── tests/                        # python tests/run_all.py — no framework needed
+├── .github/workflows/tests.yml   # CI: the suite on Python 3.9, 3.11 and 3.13
 ├── requirements.txt
 └── README.md                     # This file
 ```
@@ -436,6 +438,23 @@ unattended run:
   can never be mistaken for a finished one. Temporary files are removed either way.
 - A failure is reported per video, the rest continue, and the exit code is non-zero with a
   summary of what to re-run.
+
+### Tests
+
+Plain scripts, not a pytest suite: each prints what it checked and exits 0 or 1.
+
+```powershell
+python tests\run_all.py
+```
+
+`.github/workflows/tests.yml` runs them on every pull request and every push to `main`,
+across Python 3.9 (the minimum claimed above), 3.11 and 3.13, plus a compile pass and the
+conflict-marker check. All five of 3.9–3.13 were run against the suite before that matrix
+was written, so it reflects what was measured.
+
+CI installs `reportlab` only. `playwright` would pull a browser and `faster-whisper` a
+model runtime, and neither is reachable from the tests — the browser is stubbed, and
+transcription skips when no backend is present.
 
 ### A misspelled flag cannot disarm a safety
 

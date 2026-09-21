@@ -78,6 +78,17 @@ def check(failures, cond, msg):
         failures.append(msg)
 
 
+def backend_installed():
+    """True when local speech-to-text is actually available here."""
+    for module in ("faster_whisper", "whisper"):
+        try:
+            __import__(module)
+            return True
+        except Exception:
+            continue
+    return False
+
+
 def main():
     failures = []
     with tempfile.TemporaryDirectory() as base:
@@ -122,15 +133,23 @@ def main():
         narrow = {r["url_name"]: r for r in tv.plan(modules, archive, store, 5)}
         check(failures, not narrow["short"]["do"], "--max-minutes 5 should exclude a 6 min video")
 
-        # No backend installed must be a clear instruction, not an ImportError.
-        try:
-            tv.load_transcriber("small")
-            check(failures, False, "a backend is installed here; expected none")
-        except RuntimeError as exc:
-            check(failures, "faster-whisper" in str(exc) and "locally" in str(exc),
-                  f"the message should name the install and say it is local: {exc}")
-        except Exception as exc:
-            check(failures, False, f"expected RuntimeError, got {type(exc).__name__}: {exc}")
+        # A missing backend must be a clear instruction, not an ImportError.
+        # Only assertable where none is installed: faster-whisper is in
+        # requirements.txt, so anyone who installed it - including CI - would
+        # otherwise see this fail for the wrong reason.
+        if backend_installed():
+            print("  [SKIP] a whisper backend is installed; "
+                  "the missing-backend message is not exercised")
+        else:
+            try:
+                tv.load_transcriber("small")
+                check(failures, False, "no backend is installed, so this should raise")
+            except RuntimeError as exc:
+                check(failures, "faster-whisper" in str(exc) and "locally" in str(exc),
+                      f"the message should name the install and say it is local: {exc}")
+            except Exception as exc:
+                check(failures, False,
+                      f"expected RuntimeError, got {type(exc).__name__}: {exc}")
 
     # Two OpenMP runtimes abort the process on Windows rather than raising, so
     # the variable has to be set before the backend is touched - the user had
@@ -139,8 +158,8 @@ def main():
     try:
         try:
             tv.load_transcriber("small")
-        except RuntimeError:
-            pass
+        except Exception:
+            pass    # the variable is set before the backend is touched either way
         check(failures, os.environ.get("KMP_DUPLICATE_LIB_OK") == "TRUE",
               "KMP_DUPLICATE_LIB_OK should be set before loading the backend")
 
@@ -148,7 +167,7 @@ def main():
         os.environ["KMP_DUPLICATE_LIB_OK"] = "FALSE"
         try:
             tv.load_transcriber("small")
-        except RuntimeError:
+        except Exception:
             pass
         check(failures, os.environ["KMP_DUPLICATE_LIB_OK"] == "FALSE",
               "an explicitly set KMP_DUPLICATE_LIB_OK must not be overwritten")
