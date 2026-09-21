@@ -29,7 +29,8 @@ from xml.sax.saxutils import escape as xml_escape
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import COURSE_STRUCTURE_PATH, EXTRACT_DIR, ORGANIZED_CONTENT_DIR  # noqa: E402
+from config import (COURSE_STRUCTURE_PATH, EXTRACT_DIR,  # noqa: E402
+                    ORGANIZED_CONTENT_DIR, TRANSCRIPTS_DIR)
 from extract_edx import find_course_root  # noqa: E402
 
 MODULE_NUMBER_RE = re.compile(r"^\s*(\d+)")
@@ -197,10 +198,18 @@ def transcript_candidates(video_root, course_root):
     return existing
 
 
+# Teams exports WebVTT with speaker tags: <v Per Berg>...</v>. Keeping the
+# speaker makes a webinar transcript readable as dialogue rather than one wall
+# of text, so the tag is unwrapped rather than stripped.
+VTT_SPEAKER_RE = re.compile(r"<v\s+([^>]+)>(.*?)(?:</v>|$)", re.I | re.S)
+VTT_TAG_RE = re.compile(r"<[^>]+>")
+TIMECODE_RE = re.compile(r"-->")
+
+
 def read_transcript(path):
-    """Text of a .sjson or .srt transcript, timecodes removed."""
+    """Plain text of a .sjson, .srt, .vtt or .txt transcript."""
     try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+        with open(path, "r", encoding="utf-8-sig", errors="ignore") as fh:
             raw = fh.read()
     except Exception:
         return ""
@@ -212,11 +221,51 @@ def read_transcript(path):
         except Exception:
             pass
 
-    lines = [ln.strip() for ln in raw.splitlines()]
-    return " ".join(ln for ln in lines if ln and not ln.isdigit() and "-->" not in ln)
+    if path.lower().endswith(".txt"):
+        return " ".join(raw.split())
+
+    out, speaker = [], None
+    for line in raw.splitlines():
+        line = line.strip()
+        if (not line or line.isdigit() or TIMECODE_RE.search(line)
+                or line.upper().startswith(("WEBVTT", "NOTE ", "STYLE"))):
+            continue
+        match = VTT_SPEAKER_RE.search(line)
+        if match:
+            name, said = match.group(1).strip(), VTT_TAG_RE.sub("", match.group(2)).strip()
+            if not said:
+                continue
+            out.append(f"{name}: {said}" if name != speaker else said)
+            speaker = name
+        else:
+            out.append(VTT_TAG_RE.sub("", line))
+    return " ".join(part for part in out if part)
 
 
-def video_entry(url_name, vertical_title, course_root, stats):
+def stored_transcript(url_name, title, transcripts_dir):
+    """A transcript dropped into the store, by url_name or by slugified title.
+
+    url_name is the stable key; the title form exists so a file exported from
+    Teams can be renamed to something recognisable by hand.
+    """
+    if not transcripts_dir or not os.path.isdir(transcripts_dir):
+        return ""
+    keys = [url_name]
+    if title:
+        keys.append(re.sub(r"_+", "_", re.sub(r"[^A-Za-z0-9]", "_", title)).strip("_"))
+    for key in keys:
+        if not key:
+            continue
+        for ext in (".txt", ".vtt", ".srt", ".sjson", ".json"):
+            candidate = os.path.join(transcripts_dir, f"{key}{ext}")
+            if os.path.exists(candidate):
+                text = read_transcript(candidate)
+                if text:
+                    return text
+    return ""
+
+
+def video_entry(url_name, vertical_title, course_root, stats, transcripts_dir=None):
     """(title, transcript_text) for one video component."""
     path = os.path.join(course_root, "video", f"{url_name}.xml")
     title = vertical_title or url_name
@@ -231,11 +280,20 @@ def video_entry(url_name, vertical_title, course_root, stats):
 
     title = html.unescape(root.get("display_name") or vertical_title or url_name)
     stats["videos"] += 1
+
     for candidate in transcript_candidates(root, course_root):
         text = read_transcript(candidate)
         if text:
             stats["transcripts"] += 1
+            stats["from_olx"] += 1
             return title, text
+
+    text = stored_transcript(url_name, title, transcripts_dir)
+    if text:
+        stats["transcripts"] += 1
+        stats["from_store"] += 1
+        return title, text
+
     return title, NO_TRANSCRIPT
 
 
@@ -337,7 +395,8 @@ def build_styles(fonts=None):
     return styles
 
 
-def module_story(module, course_root, styles, stats, unicode_ok=True):
+def module_story(module, course_root, styles, stats, unicode_ok=True,
+                 transcripts_dir=None):
     """Flowables for one module, in course order."""
     from reportlab.platypus import Paragraph, Spacer
     from reportlab.lib.units import mm
@@ -378,7 +437,7 @@ def module_story(module, course_root, styles, stats, unicode_ok=True):
 
                     elif ctype == "video":
                         title, text = video_entry(url_name, vert.get("title", ""),
-                                                  course_root, stats)
+                                                  course_root, stats, transcripts_dir)
                         story.append(para(f"Video: {title}", styles["inner"]))
                         story.append(para(text, styles["video"]))
 
@@ -419,6 +478,8 @@ def main() -> int:
     parser.add_argument("--module", help="module number, or a chapter title fragment")
     parser.add_argument("--list", action="store_true", help="list modules and exit")
     parser.add_argument("--out-dir", default=ORGANIZED_CONTENT_DIR)
+    parser.add_argument("--transcripts-dir", default=TRANSCRIPTS_DIR,
+                        help="directory of transcripts keyed by video url_name")
     args = parser.parse_args()
 
     if not os.path.exists(COURSE_STRUCTURE_PATH):
@@ -467,9 +528,10 @@ def main() -> int:
         print("[WARN] No Unicode font found; em-dashes and curly quotes will be")
         print("       transliterated to ASCII rather than dropped.")
 
-    stats = {"units": 0, "subunits": 0, "html": 0, "videos": 0,
-             "transcripts": 0, "video_missing": 0, "skipped": {}}
-    story = module_story(module, course_root, styles, stats, unicode_ok=bool(fonts))
+    stats = {"units": 0, "subunits": 0, "html": 0, "videos": 0, "transcripts": 0,
+             "from_olx": 0, "from_store": 0, "video_missing": 0, "skipped": {}}
+    story = module_story(module, course_root, styles, stats, unicode_ok=bool(fonts),
+                         transcripts_dir=args.transcripts_dir)
 
     os.makedirs(args.out_dir, exist_ok=True)
     out_path = os.path.join(args.out_dir, module_filename(module))
@@ -480,11 +542,18 @@ def main() -> int:
     print(f"     {len(module['chapters'])} chapter(s), {stats['units']} unit(s), "
           f"{stats['subunits']} subunit(s), {stats['html']} html component(s)")
     if stats["videos"] or stats["video_missing"]:
-        print(f"     videos: {stats['videos']}, with transcript: {stats['transcripts']}, "
-              f"unreadable xml: {stats['video_missing']}")
+        sources = []
+        if stats["from_olx"]:
+            sources.append(f"{stats['from_olx']} from the export")
+        if stats["from_store"]:
+            sources.append(f"{stats['from_store']} from {args.transcripts_dir}/")
+        detail = f" ({', '.join(sources)})" if sources else ""
+        print(f"     videos: {stats['videos']}, with transcript: {stats['transcripts']}"
+              f"{detail}, unreadable xml: {stats['video_missing']}")
         if stats["videos"] and not stats["transcripts"]:
-            print("     [WARN] No transcripts found. Video text is unavailable from the")
-            print("            export; each video appears with its title only.")
+            print("     [WARN] No transcripts found. Drop them into "
+                  f"{args.transcripts_dir}/ named")
+            print("            <video url_name>.vtt (or .txt/.srt) and re-run.")
     if stats["skipped"]:
         detail = ", ".join(f"{n} {t}" for t, n in sorted(stats["skipped"].items()))
         print(f"     not included: {detail}")

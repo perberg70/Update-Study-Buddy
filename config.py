@@ -27,6 +27,12 @@ MANIFEST_PATH = os.getenv("PROCESSING_MANIFEST_PATH", "processing_manifest.json"
 REVIEW_PATH = os.getenv("COMPARISON_REVIEW_PATH", "comparison_review.json")
 
 EXTRACT_DIR = os.getenv("EDX_EXTRACT_DIR", "edx_export")
+
+# Transcripts arrive from several places - exported from Teams by hand, produced
+# by local speech-to-text, or shipped inside the OLX - so they share one store
+# keyed by the video's url_name. Anything dropped here is picked up by
+# tools/build_module_pdf.py without further configuration.
+TRANSCRIPTS_DIR = os.getenv("TRANSCRIPTS_DIR", "transcripts")
 ORGANIZED_CONTENT_DIR = os.getenv("ORGANIZED_CONTENT_DIR", "Organized_Course_Content")
 COURSE_STRUCTURE_PATH = os.getenv("COURSE_STRUCTURE_PATH", "course_structure.json")
 

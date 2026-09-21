@@ -11,6 +11,9 @@ course_structure.json
 processing_manifest.json
 comparison_review.json
 
+# Transcripts: course content, whether exported from Teams or produced locally.
+transcripts/
+
 # Diagnostics, which also capture real source titles.
 export_sources_debug.json
 export_sources_debug.txt
