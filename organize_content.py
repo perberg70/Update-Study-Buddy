@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import xml.etree.ElementTree as ET
 import json
 import shutil
@@ -8,7 +9,8 @@ import subprocess
 import urllib.request
 import html
 
-from config import COURSE_STRUCTURE_PATH, EXTRACT_DIR, MANIFEST_PATH, ORGANIZED_CONTENT_DIR
+from config import (COURSE_STRUCTURE_PATH, DOWNLOAD_RETRIES, DOWNLOAD_TIMEOUT,
+                    EXTRACT_DIR, MANIFEST_PATH, ORGANIZED_CONTENT_DIR)
 from extract_edx import find_course_root
 
 
@@ -54,6 +56,88 @@ def video_output_name(video_root, vertical_title="", fallback=""):
     return slugify(video_title)
 
 
+def human_size(num_bytes):
+    for unit in ("B", "KB", "MB", "GB"):
+        if num_bytes < 1024 or unit == "GB":
+            return f"{num_bytes:.0f}{unit}" if unit == "B" else f"{num_bytes:.1f}{unit}"
+        num_bytes /= 1024.0
+
+
+def download_with_retry(url, dest, timeout=DOWNLOAD_TIMEOUT, retries=DOWNLOAD_RETRIES):
+    """Download *url* to *dest*, retrying with backoff. Returns bytes written.
+
+    Writes to a .part file and renames on success, so an interrupted download
+    can never be mistaken for a complete one. The timeout matters most here:
+    without it a stalled CDN response hangs an unattended run indefinitely with
+    no output at all.
+    """
+    # A User-Agent is required; the CDN returns 403 to the urllib default.
+    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    partial = dest + ".part"
+    last_error = None
+
+    for attempt in range(1, retries + 1):
+        written = 0
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                total = int(response.headers.get("Content-Length") or 0)
+                if total:
+                    print(f"      {human_size(total)} to fetch...", flush=True)
+                with open(partial, "wb") as out:
+                    while True:
+                        chunk = response.read(1024 * 256)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                        written += len(chunk)
+            if total and written < total:
+                raise IOError(f"truncated: got {written} of {total} bytes")
+            os.replace(partial, dest)
+            return written
+        except Exception as exc:
+            last_error = exc
+            if os.path.exists(partial):
+                try:
+                    os.remove(partial)
+                except OSError:
+                    pass
+            if attempt < retries:
+                delay = 2 ** attempt
+                print(f"      attempt {attempt} of {retries} failed "
+                      f"({type(exc).__name__}: {str(exc)[:70]}); retrying in {delay}s",
+                      flush=True)
+                time.sleep(delay)
+
+    raise IOError(f"download failed after {retries} attempt(s): {last_error}")
+
+
+def extract_audio(source, dest):
+    """Convert *source* to mp3 with ffmpeg, surfacing ffmpeg's own error text."""
+    result = subprocess.run(
+        ["ffmpeg", "-y", "-i", source, "-q:a", "0", "-map", "a", dest],
+        capture_output=True, check=False,
+    )
+    if result.returncode != 0:
+        stderr = (result.stderr or b"").decode("utf-8", "replace").strip()
+        tail = "\n        ".join(stderr.splitlines()[-4:]) or "(no output)"
+        raise RuntimeError(f"ffmpeg exited {result.returncode}:\n        {tail}")
+
+
+def unique_name(filename, taken):
+    """Avoid silently overwriting when two videos slugify to the same name.
+
+    Only collisions *within this run* are disambiguated. An existing file on
+    disk is a completed download to be reused, not a clash.
+    """
+    stem, ext = os.path.splitext(filename)
+    candidate, n = filename, 2
+    while candidate.lower() in taken:
+        candidate = f"{stem}_{n}{ext}"
+        n += 1
+    taken.add(candidate.lower())
+    return candidate
+
+
 def clean_html(html_content):
     # Strip HTML tags and normalize whitespace
     text = re.sub('<[^>]*>', ' ', html_content)
@@ -82,6 +166,7 @@ def organize_course(extract_dir, output_dir):
         sys.exit(1)
 
     manifest = []
+    video_failures = []
 
     for i, chapter in enumerate(structure["chapters"]):
         # Create a clean folder name for the chapter (match old scheme: 01_Welcome___What_..., not 01_1__Welcome_...)
@@ -91,6 +176,7 @@ def organize_course(extract_dir, output_dir):
         
         chapter_manifest = {"chapter": chapter['title'], "files": []}
         merged_text = []
+        used_names = set()
 
         for seq in chapter["sequentials"]:
             for vert in seq["verticals"]:
@@ -121,30 +207,51 @@ def organize_course(extract_dir, output_dir):
                                 # Find direct MP4 link in edX metadata
                                 for asset in root.findall(".//video_asset/encoded_video"):
                                     vid_url = asset.get('url')
-                                    if vid_url and vid_url.endswith('.mp4'):
-                                        mp3_filename = f"{clean_vid_name}.mp3"
-                                        mp3_path = os.path.join(ch_dir, mp3_filename)
-                                        temp_mp4 = os.path.join(ch_dir, "temp_download.mp4")
-                                        
-                                        print(f"Downloading edX MP4: '{video_title}'...")
-                                        # Use User-Agent to bypass 403 Forbidden errors from CDN
-                                        req = urllib.request.Request(vid_url, headers={'User-Agent': 'Mozilla/5.0'})
-                                        with urllib.request.urlopen(req) as response, open(temp_mp4, 'wb') as out_file:
-                                            shutil.copyfileobj(response, out_file)
-                                        
-                                        print(f"Converting to MP3: {mp3_filename}...")
-                                        subprocess.run(["ffmpeg", "-y", "-i", temp_mp4, "-q:a", "0", "-map", "a", mp3_path], 
-                                                     capture_output=True, check=True)
-                                        os.remove(temp_mp4)
-                                        
-                                        chapter_manifest["files"].append({
-                                            "name": mp3_filename,
-                                            "path": mp3_path,
-                                            "type": "audio"
-                                        })
+                                    if not (vid_url and vid_url.endswith('.mp4')):
+                                        continue
+
+                                    mp3_filename = unique_name(f"{clean_vid_name}.mp3", used_names)
+                                    mp3_path = os.path.join(ch_dir, mp3_filename)
+
+                                    # Already converted on an earlier run: reuse it.
+                                    # Without this, a run interrupted at video 15 of 17
+                                    # starts again from the first one.
+                                    if os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 0:
+                                        print(f"   [skip] {mp3_filename} already built")
+                                        chapter_manifest["files"].append(
+                                            {"name": mp3_filename, "path": mp3_path, "type": "audio"})
                                         break
+
+                                    temp_mp4 = os.path.join(ch_dir, f".{clean_vid_name}.download.mp4")
+                                    try:
+                                        print(f"   [get]  {video_title[:56]}", flush=True)
+                                        written = download_with_retry(vid_url, temp_mp4)
+                                        print(f"   [conv] {mp3_filename} ({human_size(written)})",
+                                              flush=True)
+                                        extract_audio(temp_mp4, mp3_path)
+                                        chapter_manifest["files"].append(
+                                            {"name": mp3_filename, "path": mp3_path, "type": "audio"})
+                                    except Exception as exc:
+                                        print(f"   [FAIL] {video_title[:46]}: {exc}")
+                                        video_failures.append((video_title, str(exc)))
+                                        if os.path.exists(mp3_path):
+                                            # A partial mp3 would be reused as complete
+                                            # by the skip check above.
+                                            try:
+                                                os.remove(mp3_path)
+                                            except OSError:
+                                                pass
+                                    finally:
+                                        for leftover in (temp_mp4, temp_mp4 + ".part"):
+                                            if os.path.exists(leftover):
+                                                try:
+                                                    os.remove(leftover)
+                                                except OSError:
+                                                    pass
+                                    break
                             except Exception as e:
                                 print(f"Error processing video {comp['url_name']}: {e}")
+                                video_failures.append((comp.get("url_name", "?"), str(e)))
 
         # Save merged text content for NoteBookLM
         if merged_text:
@@ -171,7 +278,15 @@ def organize_course(extract_dir, output_dir):
     with open(MANIFEST_PATH, "w", encoding="utf-8") as f:
         # Save relative paths for subagent compatibility
         json.dump(manifest, f, indent=4)
-    print("[OK] Organization and media processing complete.")
+
+    total_files = sum(len(c["files"]) for c in manifest)
+    if video_failures:
+        print(f"\n[WARN] {len(video_failures)} video(s) failed:")
+        for title, reason in video_failures:
+            print(f"   - {title[:48]}: {reason[:90]}")
+        print("   Re-run to retry only these; completed files are skipped.")
+    print(f"[OK] Organization complete: {total_files} file(s) in {MANIFEST_PATH}")
+    return 1 if video_failures else 0
 
 if __name__ == "__main__":
-    organize_course(EXTRACT_DIR, ORGANIZED_CONTENT_DIR)
+    raise SystemExit(organize_course(EXTRACT_DIR, ORGANIZED_CONTENT_DIR))

@@ -159,6 +159,25 @@ Resolve duplicates in the notebook UI, where you can open each source. Duplicate
 themselves caused by a broken export (comparison saw no existing sources and re-uploaded
 everything), so a working export removes the need for routine deduplication.
 
+### Video downloads
+
+`organize_content.py` fetches and transcodes every video with a direct `.mp4`, which for
+this course is 17 files and several hours of audio. It is built to survive a long
+unattended run:
+
+- **Timeout** (`DOWNLOAD_TIMEOUT`, default 60s) — a stalled CDN response fails instead of
+  hanging the run with no output.
+- **Retry with backoff** (`DOWNLOAD_RETRIES`, default 3) — 2s, then 4s.
+- **Resume** — a video whose `.mp3` already exists is skipped, so a run interrupted at
+  video 15 of 17 does not start again from the first.
+- **Truncation is rejected** — a response shorter than its `Content-Length` is discarded
+  rather than kept as a valid file.
+- **ffmpeg's own error text is printed**, not just `CalledProcessError`.
+- Downloads land in a `.part` file and are renamed on success, so an interrupted transfer
+  can never be mistaken for a finished one. Temporary files are removed either way.
+- A failure is reported per video, the rest continue, and the exit code is non-zero with a
+  summary of what to re-run.
+
 ### Safety behaviour
 
 - **Deletion matches titles exactly** and is bounded by the number of copies actually

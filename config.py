@@ -36,6 +36,11 @@ TRANSCRIPTS_DIR = os.getenv("TRANSCRIPTS_DIR", "transcripts")
 ORGANIZED_CONTENT_DIR = os.getenv("ORGANIZED_CONTENT_DIR", "Organized_Course_Content")
 COURSE_STRUCTURE_PATH = os.getenv("COURSE_STRUCTURE_PATH", "course_structure.json")
 
+# Video downloads. A course export can hold 10+ hours of webinar recordings, so
+# a stalled connection must fail rather than hang the whole run unattended.
+DOWNLOAD_TIMEOUT = int(os.getenv("DOWNLOAD_TIMEOUT", "60"))
+DOWNLOAD_RETRIES = int(os.getenv("DOWNLOAD_RETRIES", "3"))
+
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "200"))
 ENFORCE_UPLOAD_SIZE_LIMIT = os.getenv("ENFORCE_UPLOAD_SIZE_LIMIT", "false").lower() in {
     "1",
