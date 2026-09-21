@@ -53,15 +53,18 @@ TEXT_READY = {".txt": "stdlib", ".md": "stdlib", ".html": "stdlib",
 AUDIO_SUFFIXES = (".m4a", ".mp3", ".wav", ".ogg", ".aac", ".flac")
 
 
-def url_name(stored_name):
-    """The /static/ spelling of a stored filename.
+# edX keeps the uploaded filename but makes its static URL safe, replacing
+# every character outside this set with an underscore. Derived from the real
+# course: "Intro Learning with AI (Mod 2).png" is linked as
+# "Intro_Learning_with_AI__Mod_2_.png", and "students' learning" as
+# "students__learning" - so brackets and apostrophes go the same way as spaces,
+# while dot, dash and underscore survive.
+URL_UNSAFE_RE = re.compile(r"[^A-Za-z0-9._-]")
 
-    edX keeps the uploaded name, spaces and all, but its static URLs replace
-    spaces with underscores - so static/"AI Shifts.png" is linked as
-    /static/AI_Shifts.png. Matching the two literally reports every such file
-    as both missing and unreferenced at once.
-    """
-    return stored_name.replace(" ", "_")
+
+def url_name(stored_name):
+    """The /static/ spelling of a stored filename."""
+    return URL_UNSAFE_RE.sub("_", stored_name)
 
 
 def build_lookup(present):
@@ -85,6 +88,34 @@ def pdf_reader_available():
     return ""
 
 
+IMG_RE = re.compile(r"<img\b[^>]*>", re.I)
+ATTR_RE = re.compile(r"""(\w[\w-]*)\s*=\s*["']([^"']*)["']""")
+
+
+def image_alts(body):
+    """{static name: alt text} for every <img> in a component."""
+    alts = {}
+    for tag in IMG_RE.findall(body):
+        attrs = dict(ATTR_RE.findall(tag))
+        src = attrs.get("src", "")
+        match = STATIC_REF_RE.search(src)
+        if match:
+            alts[match.group(1)] = (attrs.get("alt") or "").strip()
+    return alts
+
+
+def prose_words(body):
+    """Visible words in a component, reusing the PDF's own HTML reader."""
+    try:
+        from build_module_pdf import HtmlToBlocks
+        parser = HtmlToBlocks()
+        parser.feed(body)
+        parser.close()
+        return sum(len(text.split()) for _kind, text in parser.blocks)
+    except Exception:
+        return -1
+
+
 def module_assets(module, archive):
     """{asset name: [components that link to it]} for one module's HTML."""
     found = {}
@@ -103,9 +134,15 @@ def module_assets(module, archive):
                     body = archive.read_text(f"html/{comp['url_name']}.html")
                     if not body:
                         continue
+                    alts = image_alts(body)
+                    words = prose_words(body)
                     for name in STATIC_REF_RE.findall(body):
-                        found.setdefault(name, []).append(
-                            f"{seq.get('title', '?')} / {vert.get('title', '?')}")
+                        found.setdefault(name, []).append({
+                            "where": f"{seq.get('title', '?')} / "
+                                     f"{vert.get('title', '?')}",
+                            "alt": alts.get(name, ""),
+                            "words": words,
+                        })
     return found
 
 
@@ -189,8 +226,16 @@ def main() -> int:
             shown = stored if stored == name else f"{stored}  (linked as {name})"
             print(f"   [{kind:10}] {shown}  ({size})")
             print(f"   {'':12} {how}")
-            print(f"   {'':12} linked from: {where[0]}"
+            first = where[0]
+            print(f"   {'':12} linked from: {first['where']}"
                   + (f" (+{len(where) - 1} more)" if len(where) > 1 else ""))
+            if kind == "image":
+                # Whether OCR is worth it turns on this: an image beside a page
+                # of prose is illustration, one on a near-empty page is the
+                # lesson.
+                alt = first["alt"] or "(no alt text)"
+                print(f"   {'':12} alt: {alt[:58]}")
+                print(f"   {'':12} prose in that component: {first['words']} word(s)")
         print()
 
     unreferenced = [n for n in present

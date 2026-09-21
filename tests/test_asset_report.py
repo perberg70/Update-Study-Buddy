@@ -36,7 +36,7 @@ FILES = {
     "vertical/v2.xml": '<vertical display_name="S2"><html url_name="h2"/></vertical>',
     "vertical/v3.xml": '<vertical display_name="S3"><html url_name="h3"/></vertical>',
     "html/h1.html": '<a href="/static/handbook.pdf">h</a>'
-                    '<img src="/static/pic.png"/>'
+                    '<img src="/static/pic.png" alt="a diagram"/>'
                     '<a href="/static/handbook.pdf?v=2#page3">again, with query</a>'
                     # edX links with underscores what it stores with spaces
                     '<a href="/static/AI_Shifts.png">shifts</a>'
@@ -106,8 +106,31 @@ def main():
         check(failures, lookup.get("AI_Shifts.png") == "AI Shifts.png",
               "a space-named file must resolve from its underscore link")
         check(failures, not collisions, f"no collisions expected here: {collisions}")
-        check(failures, ar.url_name("a b c.png") == "a_b_c.png",
-              "every space becomes an underscore")
+        # Derived from the real course: brackets and apostrophes go the way of
+        # spaces, while dot, dash and underscore survive.
+        for stored, linked, why in [
+            ("a b c.png", "a_b_c.png", "spaces"),
+            ("Intro Learning with AI (Mod 2).png",
+             "Intro_Learning_with_AI__Mod_2_.png", "brackets"),
+            ("The effect on students' learning.pdf",
+             "The_effect_on_students__learning.pdf", "apostrophe"),
+            ("HI Gen AI - Purpose - Autumn 2026.png",
+             "HI_Gen_AI_-_Purpose_-_Autumn_2026.png", "hyphens survive"),
+            ("Course_Schedule_SS_2026.png", "Course_Schedule_SS_2026.png",
+             "an already-safe name is unchanged"),
+        ]:
+            check(failures, ar.url_name(stored) == linked,
+                  f"{why}: {stored!r} -> {ar.url_name(stored)!r}, expected {linked!r}")
+
+        # Whether an image is the lesson or decorates it decides whether OCR
+        # is worth adding, so alt text and the prose beside it are reported.
+        entries = one["pic.png"]
+        check(failures, entries and entries[0]["alt"] == "a diagram",
+              f"alt text should be captured, got {entries[0].get('alt')!r}")
+        check(failures, entries[0]["words"] > 0,
+              "the prose in the linking component should be counted")
+        check(failures, one["handbook.pdf"][0]["alt"] == "",
+              "a non-image link has no alt text")
 
         # Course audio is speech, so the Whisper path applies, not a doc reader.
         kind, how = ar.classify("Section 5 summary.m4a", archive, pdf_lib)
