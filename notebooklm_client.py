@@ -7,7 +7,7 @@ browser tab they drive.
 
 from __future__ import annotations
 
-from config import CDP_URL
+from config import CDP_URL, NOTEBOOK_HOSTS
 
 CHROME_HINT = "Start Chrome with: chrome.exe --remote-debugging-port=9222"
 
@@ -30,7 +30,7 @@ def is_web_page(page) -> bool:
     return url.startswith(("http://", "https://"))
 
 
-def pick_page(context, prefer: str = "notebooklm.google.com"):
+def pick_page(context, prefer=NOTEBOOK_HOSTS):
     """Return a real web page from *context*, preferring one already on *prefer*.
 
     Chrome exposes extension offscreen documents, devtools windows and
@@ -38,18 +38,19 @@ def pick_page(context, prefer: str = "notebooklm.google.com"):
     Navigating one of those to an https URL fails with net::ERR_ABORTED, so
     they are skipped here rather than discovered as a crash later.
     """
+    hosts = (prefer,) if isinstance(prefer, str) else tuple(prefer or ())
     fallback = None
     for page in context.pages:
         if not is_web_page(page):
             continue
-        if prefer and prefer in page.url:
+        if any(host in page.url for host in hosts):
             return page
         if fallback is None:
             fallback = page
     return fallback if fallback is not None else context.new_page()
 
 
-def connect(playwright, prefer: str = "notebooklm.google.com"):
+def connect(playwright, prefer=NOTEBOOK_HOSTS):
     """Connect to Chrome over CDP and return ``(browser, page)``.
 
     Raises BrowserConnectionError with an actionable message instead of

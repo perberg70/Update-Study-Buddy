@@ -11,10 +11,15 @@ import re
 from pathlib import Path
 from typing import Optional
 
+# NotebookLM was rebranded to "Gemini Notebook" and moved to notebook.google.com.
+# notebooklm.google.com still redirects, but pointing here directly avoids relying on it.
 PROJECT_URL = os.getenv(
     "NOTEBOOKLM_PROJECT_URL",
-    "https://notebooklm.google.com/notebook/82c34a38-cbc5-47fe-8001-36696f67d7fb",
+    "https://notebook.google.com/notebook/82c34a38-cbc5-47fe-8001-36696f67d7fb",
 )
+
+# Hosts that count as "the notebook" when choosing which browser tab to drive.
+NOTEBOOK_HOSTS = ("notebook.google.com", "notebooklm.google.com")
 CDP_URL = os.getenv("NOTEBOOKLM_CDP_URL", "http://localhost:9222")
 
 CURRENT_SOURCES_FILE = os.getenv("CURRENT_SOURCES_FILE", "current_sources.json")
