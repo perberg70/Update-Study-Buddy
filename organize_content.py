@@ -11,6 +11,48 @@ import html
 from config import COURSE_STRUCTURE_PATH, EXTRACT_DIR, MANIFEST_PATH, ORGANIZED_CONTENT_DIR
 
 
+def slugify(text):
+    """Collapse anything non-alphanumeric to single underscores."""
+    slug = re.sub(r"[^a-zA-Z0-9]", "_", text)
+    return re.sub(r"_+", "_", slug).strip("_")
+
+
+def chapter_dir_name(index, chapter_title):
+    """Folder/text-file stem for a chapter, e.g. '01_Welcome_What_GenAI_Can_Do_Today'.
+
+    *index* is zero-based. Leading "1. " numbering in the title is stripped so the
+    result is '01_Welcome...' rather than '01_1_Welcome...'.
+    """
+    title_for_slug = re.sub(r"^\s*\d+\.?\s*", "", (chapter_title or "").strip())
+    return f"{index + 1:02d}_{slugify(title_for_slug)}"
+
+
+def video_output_name(video_root, vertical_title="", fallback=""):
+    """Filename stem for a video's extracted audio, without the .mp3 extension.
+
+    Prefers the longest of: the video's display_name, its vertical's title, and the
+    original uploaded filename (client_video_id), on the assumption that the longest
+    is the most descriptive. A generic display_name is always overridden.
+    """
+    video_title = html.unescape(video_root.get("display_name", fallback) or fallback)
+    vert_title = html.unescape((vertical_title or "").strip())
+    if vert_title and len(vert_title) > len(video_title):
+        video_title = vert_title
+
+    video_asset = video_root.find(".//video_asset")
+    if video_asset is not None and video_asset.get("client_video_id"):
+        client_id = video_asset.get("client_video_id", "").strip()
+        if client_id:
+            orig_name = re.sub(r"\.[^.]+$", "", client_id)
+            generic = video_title.strip().lower() in ("video", "recording", "teaser") or (
+                len(video_title.split()) <= 3 and "recording" in video_title.lower()
+            )
+            if generic or len(orig_name) > len(video_title):
+                video_title = orig_name
+
+    return slugify(video_title)
+
+
 def clean_html(html_content):
     # Strip HTML tags and normalize whitespace
     text = re.sub('<[^>]*>', ' ', html_content)
@@ -35,10 +77,7 @@ def organize_course(extract_dir, output_dir):
 
     for i, chapter in enumerate(structure["chapters"]):
         # Create a clean folder name for the chapter (match old scheme: 01_Welcome___What_..., not 01_1__Welcome_...)
-        title_for_slug = re.sub(r'^\s*\d+\.?\s*', '', chapter['title'].strip())  # strip leading "1. " etc.
-        clean_title = re.sub(r'[^a-zA-Z0-9]', '_', title_for_slug)
-        clean_title = re.sub(r'_+', '_', clean_title).strip('_')  # collapse and trim underscores
-        ch_name = f"{i+1:02d}_{clean_title}"
+        ch_name = chapter_dir_name(i, chapter["title"])
         ch_dir = os.path.join(output_dir, ch_name)
         os.makedirs(ch_dir, exist_ok=True)
         
@@ -66,24 +105,11 @@ def organize_course(extract_dir, output_dir):
                                 tree = ET.parse(video_xml_path)
                                 root = tree.getroot()
                                 
-                                # Prefer vertical title (what edX shows as section), then video display_name, then client_video_id
-                                video_title = html.unescape(root.get("display_name", comp["url_name"]))
-                                vert_title = html.unescape((vert.get("title") or "").strip())
-                                if vert_title and len(vert_title) > len(video_title):
-                                    video_title = vert_title
-                                video_asset = root.find(".//video_asset")
-                                if video_asset is not None and video_asset.get("client_video_id"):
-                                    client_id = video_asset.get("client_video_id", "").strip()
-                                    if client_id:
-                                        orig_name = re.sub(r"\.[^.]+$", "", client_id)  # strip extension
-                                        generic = video_title.strip().lower() in ("video", "recording", "teaser") or (
-                                            len(video_title.split()) <= 3 and "recording" in video_title.lower()
-                                        )
-                                        if generic or len(orig_name) > len(video_title):
-                                            video_title = orig_name
-                                clean_vid_name = re.sub(r"[^a-zA-Z0-9]", "_", video_title)
-                                clean_vid_name = re.sub(r"_+", "_", clean_vid_name).strip("_")
-                                
+                                video_title = root.get("display_name", comp["url_name"])
+                                clean_vid_name = video_output_name(
+                                    root, vert.get("title", ""), comp["url_name"]
+                                )
+
                                 # Find direct MP4 link in edX metadata
                                 for asset in root.findall(".//video_asset/encoded_video"):
                                     vid_url = asset.get('url')
