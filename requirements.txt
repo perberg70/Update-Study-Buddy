@@ -1,0 +1,7 @@
+# Browser automation for the NotebookLM agents (export / delete / upload).
+playwright>=1.40
+
+# PDF generation for tools/build_module_pdf.py. Ships a Unicode TrueType font
+# (Vera), so module PDFs render em-dashes and Swedish characters even where no
+# system font is available.
+reportlab>=4.0
