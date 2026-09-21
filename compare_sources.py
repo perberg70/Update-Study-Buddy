@@ -33,6 +33,14 @@ HIGH_CONFIDENCE = 0.75
 SUFFIX_MATCH_SCORE = 0.9
 MIN_SUFFIX_WORDS = 3
 
+# Unmatched rows carry a pointer to their nearest counterpart, purely as context
+# for the human reviewer. Below this the "nearest" is meaningless and would be
+# noise across a hundred-odd unmatched web links, so it is omitted. A display
+# threshold only: being slightly off costs a missing or surplus hint, never an
+# action. Calibrated on real data, where true re-recordings scored 0.29-0.33 and
+# the nearest unrelated pair scored 0.22.
+CROSS_REF_FLOOR = 0.25
+
 
 def load_current_sources():
     if not os.path.exists(CURRENT_SOURCES_FILE):
@@ -229,24 +237,59 @@ def generate_review():
         matched_new.add(new_key)
         matched_old.add(cs)
 
-    # New files that didn't match anything
+    # New files that didn't match anything.
+    #
+    # Each row records its closest existing source even though the score was too
+    # low to pair. A re-recording under a new naming scheme scores near zero
+    # against its predecessor - "HI_gen_AI_VT26_Webinar_5.mp3" versus
+    # "Webinar_5_Driving_Change.mp3" shares almost no vocabulary - so no safe
+    # automatic rule can find it. Naming the nearest candidate puts the
+    # information where the decision is made, without acting on it.
     paired_keys = {(p["new_name"], p["new_path"]) for p in pairs}
     new_only = []
+    unmatched_old = [c for c in current_sources if c not in matched_old]
     for nf in new_files:
-        if (nf["name"], nf["path"]) not in paired_keys:
-            new_only.append({
-                "name": nf["name"],
-                "path": nf["path"],
-                "type": nf["type"],
-                "chapter": nf["chapter"],
-                "action": "ADD",
-            })
+        if (nf["name"], nf["path"]) in paired_keys:
+            continue
+        best_name, best_score = None, 0.0
+        for cs in unmatched_old:
+            score = compute_match_score(nf, cs)
+            if score > best_score:
+                best_name, best_score = cs, score
+        row = {
+            "name": nf["name"],
+            "path": nf["path"],
+            "type": nf["type"],
+            "chapter": nf["chapter"],
+            "action": "ADD",
+        }
+        if best_name and best_score >= CROSS_REF_FLOOR:
+            row["closest_existing"] = best_name
+            row["closest_score"] = best_score
+            row["_hint"] = (
+                "Too different to pair automatically. If this replaces "
+                f"{best_name!r}, set that row in current_only to DELETE."
+            )
+        new_only.append(row)
 
-    # Old sources not matched to any new file
+    # Old sources not matched to any new file, with the same cross-reference
+    # from the other direction.
+    unmatched_new = [nf for nf in new_files
+                     if (nf["name"], nf["path"]) not in paired_keys]
     current_only = []
     for cs in current_sources:
-        if cs not in matched_old:
-            current_only.append({"name": cs, "action": "KEEP"})
+        if cs in matched_old:
+            continue
+        best_name, best_score = None, 0.0
+        for nf in unmatched_new:
+            score = compute_match_score(nf, cs)
+            if score > best_score:
+                best_name, best_score = nf["name"], score
+        row = {"name": cs, "action": "KEEP"}
+        if best_name and best_score >= CROSS_REF_FLOOR:
+            row["closest_new_file"] = best_name
+            row["closest_score"] = best_score
+        current_only.append(row)
 
     pairs.sort(key=lambda p: -p["match_score"])
     current_only.sort(key=lambda c: c["name"].lower())
