@@ -9,3 +9,8 @@ reportlab>=4.0
 # Captions for the course's YouTube-hosted videos (tools/fetch_youtube_transcripts.py).
 # Optional: everything else works without it.
 youtube-transcript-api>=1.0
+
+# Local speech-to-text for the short videos (tools/transcribe_videos.py). Optional,
+# and local: audio never leaves the machine, which AGENTS.md requires. Several
+# times quicker on CPU than openai-whisper, which works too if preferred.
+faster-whisper>=1.0

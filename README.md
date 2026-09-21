@@ -268,6 +268,18 @@ pip install faster-whisper     # recommended: several times quicker on CPU
 pip install openai-whisper     # alternative; pulls in torch
 ```
 
+Every optional package is listed in `requirements.txt`, and `python preflight.py` reports
+which are installed and what each one enables — so a missing one shows up before a run
+rather than partway through it:
+
+```
+[OK]   reportlab available - module PDFs (tools/build_module_pdf.py)
+[WARN] youtube-transcript-api missing - YouTube captions (tools/fetch_youtube_transcripts.py)
+       pip install youtube-transcript-api
+```
+
+They are warnings, not failures: none of them gates the core pipeline.
+
 On Windows, `ctranslate2` and numpy/MKL each load their own Intel OpenMP runtime, which
 aborts the process with `OMP: Error #15`. The tool sets `KMP_DUPLICATE_LIB_OK=TRUE` for
 its own run and says so — you should not need `set KMP_DUPLICATE_LIB_OK=TRUE` yourself. If

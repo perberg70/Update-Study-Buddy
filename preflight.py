@@ -95,6 +95,40 @@ def check_playwright() -> bool:
         return False
 
 
+# (import name, pip name, what it enables). Each is genuinely optional: the
+# pipeline's core path needs none of them, and a missing one is reported as a
+# command to run rather than discovered mid-run as a traceback.
+OPTIONAL_DEPS = (
+    ("reportlab", "reportlab", "module PDFs (tools/build_module_pdf.py)"),
+    ("youtube_transcript_api", "youtube-transcript-api",
+     "YouTube captions (tools/fetch_youtube_transcripts.py)"),
+    ("faster_whisper", "faster-whisper",
+     "local transcription (tools/transcribe_videos.py)"),
+)
+
+
+def check_optional_deps() -> bool:
+    """Report the per-feature packages before a run needs them.
+
+    Always returns True - these do not gate preflight. The point is that a
+    missing one is visible here, with its install command, instead of surfacing
+    as a ModuleNotFoundError partway through a job.
+    """
+    missing = []
+    for module, package, enables in OPTIONAL_DEPS:
+        try:
+            __import__(module)
+        except Exception:
+            missing.append((package, enables))
+        else:
+            print(f"[OK] {package} available - {enables}")
+
+    for package, enables in missing:
+        print(f"[WARN] {package} missing - {enables}")
+        print(f"       pip install {package}")
+    return True
+
+
 def check_cdp_port() -> bool:
     host_port = CDP_URL.removeprefix("http://")
     host, _, port_str = host_port.partition(":")
@@ -147,11 +181,12 @@ def main() -> int:
         "python": check_python(),
         "playwright": check_playwright(),
         "ffmpeg": check_ffmpeg(),
+        "optional": check_optional_deps(),
         "cdp": check_cdp_port(),
         "export": check_tarball(),
     }
-    # The CDP port and the export are only needed by some steps, so neither
-    # fails preflight on its own - both report [WARN] above.
+    # The CDP port, the export and the per-feature packages are each needed by
+    # only some steps, so none fails preflight on its own - all report [WARN].
     required = ("code", "python", "playwright", "ffmpeg")
 
     print("------------------------------------")

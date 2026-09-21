@@ -30,7 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import COURSE_STRUCTURE_PATH, TRANSCRIPTS_DIR  # noqa: E402
-from olx_archive import CourseArchiveError, open_course_archive  # noqa: E402
+from olx_archive import CourseArchiveError, open_for_structure  # noqa: E402
 from build_module_pdf import group_modules, module_label  # noqa: E402
 from video_report import youtube_id  # noqa: E402
 
@@ -60,6 +60,23 @@ def youtube_videos(modules, archive):
                             root.get("display_name") or vert.get("title") or url_name)
                         found.append((module, url_name, title, vid))
     return found
+
+
+def require_captions_backend():
+    """Fail once, before any video, when the package is missing.
+
+    fetch_captions imports inside the function and the loop treats its
+    exceptions as per-video failures, so a missing package used to be reported
+    as a video that failed - once per video, never once as an instruction.
+    """
+    try:
+        import youtube_transcript_api  # noqa: F401
+    except ImportError:
+        raise RuntimeError(
+            "youtube-transcript-api is not installed.\n"
+            "  pip install youtube-transcript-api\n"
+            "  It asks YouTube for captions YouTube already publishes, keyed by a\n"
+            "  video id from the course XML. No course content is uploaded.")
 
 
 def fetch_captions(video_id, languages):
@@ -98,6 +115,9 @@ def main() -> int:
                         help="list what would be fetched, contact nobody")
     parser.add_argument("--force", action="store_true",
                         help="refetch even when a transcript already exists")
+    parser.add_argument("--allow-stale", action="store_true",
+                        help="run even when course_structure.json and the archive "
+                             "disagree about which export they came from")
     parser.add_argument("--tar", dest="tar_path",
                         help="course .tar.gz to read (default: the one "
                              "course_structure.json was built from)")
@@ -107,7 +127,8 @@ def main() -> int:
         print(f"[FAIL] {COURSE_STRUCTURE_PATH} not found. Run extract_edx.py first.")
         return 1
     with open(COURSE_STRUCTURE_PATH, "r", encoding="utf-8") as fh:
-        modules = group_modules(json.load(fh).get("chapters", []))
+        structure = json.load(fh)
+    modules = group_modules(structure.get("chapters", []))
     if args.module:
         modules = [m for m in modules if (m["number"] or "") == args.module.strip()]
         if not modules:
@@ -115,7 +136,7 @@ def main() -> int:
             return 1
 
     try:
-        archive = open_course_archive(args.tar_path)
+        archive = open_for_structure(structure, args.tar_path, args.allow_stale)
     except (CourseArchiveError, FileNotFoundError) as exc:
         print(f"[FAIL] {exc}")
         return 1
@@ -124,6 +145,15 @@ def main() -> int:
     if not videos:
         print("No YouTube-hosted videos found.")
         return 0
+
+    # A dry run states it contacts nothing, so it must not need the package
+    # in order to say so.
+    if not args.dry_run:
+        try:
+            require_captions_backend()
+        except RuntimeError as exc:
+            print(f"[FAIL] {exc}")
+            return 1
 
     print(f"{len(videos)} YouTube-hosted video(s)"
           f"{' - dry run, nothing will be contacted' if args.dry_run else ''}\n")

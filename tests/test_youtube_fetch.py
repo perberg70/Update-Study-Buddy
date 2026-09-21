@@ -6,6 +6,7 @@ everything except the request itself.
 Run: python tests/test_youtube_fetch.py
 """
 
+import contextlib
 import io
 import json
 import os
@@ -16,6 +17,8 @@ import xml.etree.ElementTree as ET
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from _fixtures import make_archive  # noqa: E402
+
+from olx_archive import CourseArchive  # noqa: E402
 
 import fetch_youtube_transcripts as fyt  # noqa: E402
 from video_report import youtube_id  # noqa: E402
@@ -54,6 +57,9 @@ def build_course(base):
     structure = {"chapters": [{"title": "1. M", "sequentials": [{"title": "U", "verticals": [
         {"title": "S", "components": [{"type": "video", "url_name": n}
                                       for n, _ in VIDEOS]}]}]}]}
+    # This tool writes into the transcript store, so it checks that the
+    # structure and the archive came from the same export.
+    structure["_source"] = CourseArchive(tar).fingerprint()
     path = os.path.join(base, "structure.json")
     json.dump(structure, io.open(path, "w", encoding="utf-8"))
     return tar, path
@@ -83,7 +89,9 @@ def main():
             raise ConnectionError("network went away")
 
         real_fetch, real_argv = fyt.fetch_captions, sys.argv
+        real_require = fyt.require_captions_backend
         fyt.fetch_captions = stub
+        fyt.require_captions_backend = lambda: None
         sys.argv = ["fetch_youtube_transcripts.py",
                     "--transcripts-dir", store, "--tar", tar]
         fyt.COURSE_STRUCTURE_PATH = structure
@@ -91,6 +99,7 @@ def main():
             code = fyt.main()
         finally:
             fyt.fetch_captions, sys.argv = real_fetch, real_argv
+            fyt.require_captions_backend = real_require
 
         if code != 1:
             failures.append(f"a hard failure should exit non-zero, got {code}")
@@ -105,12 +114,60 @@ def main():
             if os.path.exists(os.path.join(store, f"{name}.txt")):
                 failures.append(f"{name}: nothing should be written when there is no text")
 
+        # A missing package is a precondition, not content that failed. It
+        # must be reported once, with pip install, and attempt nothing.
+        def absent():
+            raise RuntimeError("youtube-transcript-api is not installed.\n"
+                               "  pip install youtube-transcript-api")
+
+        real_fetch, real_argv = fyt.fetch_captions, sys.argv
+        real_require = fyt.require_captions_backend
+        fyt.require_captions_backend = absent
+        fyt.fetch_captions = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("no video should be attempted with no backend"))
+        buf = io.StringIO()
+        sys.argv = ["fetch_youtube_transcripts.py", "--tar", tar,
+                    "--transcripts-dir", os.path.join(base, "store2")]
+        try:
+            with contextlib.redirect_stdout(buf):
+                code = fyt.main()
+        finally:
+            fyt.fetch_captions, sys.argv = real_fetch, real_argv
+            fyt.require_captions_backend = real_require
+        out = buf.getvalue()
+
+        if code != 1:
+            failures.append(f"a missing backend should exit 1, got {code}")
+        if "pip install youtube-transcript-api" not in out:
+            failures.append(f"the failure should name the install command:\n{out}")
+        for marker in ("[ok]", "[none]", "[have]", "fetched 0"):
+            if marker in out:
+                failures.append(f"no per-video output with no backend, saw {marker!r}")
+
+        # --dry-run contacts nothing, so it must work without the package.
+        fyt.require_captions_backend = absent
+        buf = io.StringIO()
+        sys.argv = ["fetch_youtube_transcripts.py", "--dry-run", "--tar", tar,
+                    "--transcripts-dir", os.path.join(base, "store3")]
+        try:
+            with contextlib.redirect_stdout(buf):
+                code = fyt.main()
+        finally:
+            sys.argv = real_argv
+            fyt.require_captions_backend = real_require
+        dry = buf.getvalue()
+        if code != 0 or dry.count("[would fetch]") != len(VIDEOS):
+            failures.append(f"--dry-run should list all {len(VIDEOS)} videos "
+                            f"without the package, got code={code}:\n{dry}")
+
     for msg in failures:
         print(f"  [FAIL] {msg}")
     if not failures:
         print("  [PASS] youtube id parsing, including multi-speed and url forms")
         print("  [PASS] success written; disabled / none / error / empty write nothing")
         print("  [PASS] a hard error exits non-zero")
+        print("  [PASS] a missing package is one instruction, not a failed video;")
+        print("         --dry-run still works without it")
     return not failures
 
 
