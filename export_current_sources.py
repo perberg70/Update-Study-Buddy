@@ -140,15 +140,32 @@ def run_export() -> int:
         elif name:
             rejected.append(name)
 
-    seen, unique = set(), []
+    extracted = len(sources)
+
+    seen, unique, duplicates = set(), [], {}
     for name in sources:
-        if name.lower() not in seen:
-            seen.add(name.lower())
+        key = name.lower()
+        if key not in seen:
+            seen.add(key)
             unique.append(name)
+        else:
+            duplicates[name] = duplicates.get(name, 1) + 1
     sources = unique
 
     if rejected:
         print(f"[INFO] Ignored {len(rejected)} non-source label(s), e.g. {rejected[:3]}")
+
+    # Dropping duplicates is intentional, but never silently: the difference between
+    # "the notebook has duplicate copies" and "extraction lost rows" matters.
+    if duplicates:
+        extra = extracted - len(sources)
+        print(f"[INFO] {report['rowCount']} row(s) -> {len(sources)} unique title(s).")
+        print(f"       {extra} duplicate copy/copies across {len(duplicates)} title(s):")
+        for name, count in sorted(duplicates.items(), key=lambda kv: -kv[1])[:10]:
+            print(f"         x{count}  {name[:66]}")
+        if len(duplicates) > 10:
+            print(f"         ... and {len(duplicates) - 10} more")
+        print("       Review with: python delete_agent.py --dedupe-current --dry-run")
     if mismatches:
         print(f"[WARN] {len(mismatches)} row(s) where aria-description and the visible")
         print(f"       title differ. Using aria-description. First: {mismatches[0]}")
@@ -159,12 +176,18 @@ def run_export() -> int:
         write_debug(report, "rows matched but every name was rejected")
         return 1
 
-    # Sanity-check against an independent count (one checkbox per source + 'select all').
+    # Completeness check runs on the pre-dedup count: every row must yield a name.
+    # Comparing unique names here would mask lost rows as if they were duplicates.
+    if extracted < report["rowCount"]:
+        print(f"[FAIL] {report['rowCount']} row(s) but only {extracted} name(s) extracted.")
+        write_debug(report, f"lost rows: {report['rowCount']} rows vs {extracted} names")
+        return 1
+
     expected = max(report["checkboxes"] - 1, 0)
-    if expected and abs(len(sources) - expected) > max(2, expected * 0.1):
-        print(f"[WARN] Found {len(sources)} name(s) but {expected} checkbox(es) suggest")
-        print("       a different total. Treating this as unreliable.")
-        write_debug(report, f"count mismatch: {len(sources)} names vs {expected} checkboxes")
+    if expected and abs(extracted - expected) > 2:
+        print(f"[FAIL] Extracted {extracted} name(s) but {expected} checkbox(es) suggest")
+        print(f"       {expected}. Refusing to write a source list that may be incomplete.")
+        write_debug(report, f"count mismatch: {extracted} names vs {expected} checkboxes")
         return 1
 
     with open(CURRENT_SOURCES_FILE, "w", encoding="utf-8") as fh:
