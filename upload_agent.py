@@ -5,7 +5,6 @@ import re
 from playwright.sync_api import sync_playwright
 
 from config import (
-    CDP_URL,
     ENFORCE_UPLOAD_SIZE_LIMIT,
     MANIFEST_PATH,
     MAX_UPLOAD_SIZE_MB,
@@ -13,6 +12,7 @@ from config import (
     REVIEW_PATH,
     normalize_action,
 )
+from notebooklm_client import BrowserConnectionError, connect, describe_page
 
 
 def get_upload_plan():
@@ -96,13 +96,10 @@ def run_upload():
     with sync_playwright() as p:
         try:
             print("--- Attempting to connect via CDP (Port 9222) ---")
-            browser = p.chromium.connect_over_cdp(CDP_URL)
-            context = browser.contexts[0]
-            page = context.pages[0]
-            print("[OK] Connected to existing browser via CDP.")
-        except Exception as e:
-            print(f"[FAIL] CDP connection failed: {e}")
-            print("Start Chrome with: chrome.exe --remote-debugging-port=9222")
+            browser, page = connect(p)
+            print(f"[OK] Connected via CDP. Driving tab: {describe_page(page)}")
+        except BrowserConnectionError as e:
+            print(f"[FAIL] {e}")
             return
 
         page.goto(PROJECT_URL, wait_until="domcontentloaded")

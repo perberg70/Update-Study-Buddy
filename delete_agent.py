@@ -10,7 +10,8 @@ import os
 import re
 import sys
 
-from config import CDP_URL, CURRENT_SOURCES_FILE, PROJECT_URL, REVIEW_PATH, normalize_action
+from config import CURRENT_SOURCES_FILE, PROJECT_URL, REVIEW_PATH, normalize_action
+from notebooklm_client import BrowserConnectionError, connect, describe_page
 
 
 
@@ -407,13 +408,10 @@ def _execute_deletion_plan(plan, dry_run: bool = False):
     with sync_playwright() as p:
         try:
             print("--- Attempting to connect via CDP (Port 9222) ---")
-            browser = p.chromium.connect_over_cdp(CDP_URL)
-            context = browser.contexts[0]
-            page = context.pages[0]
-            print("[OK] Connected to existing browser via CDP.")
-        except Exception as e:
-            print(f"[FAIL] CDP connection failed: {e}")
-            print("Start Chrome with: chrome.exe --remote-debugging-port=9222")
+            browser, page = connect(p)
+            print(f"[OK] Connected via CDP. Driving tab: {describe_page(page)}")
+        except BrowserConnectionError as e:
+            print(f"[FAIL] {e}")
             sys.exit(1)
 
         page.goto(PROJECT_URL, wait_until="domcontentloaded")

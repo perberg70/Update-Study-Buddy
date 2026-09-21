@@ -9,7 +9,8 @@ import re
 import sys
 from playwright.sync_api import sync_playwright
 
-from config import CDP_URL, CURRENT_SOURCES_FILE, PROJECT_URL
+from config import CURRENT_SOURCES_FILE, PROJECT_URL
+from notebooklm_client import BrowserConnectionError, connect, describe_page
 
 
 def run_export():
@@ -17,13 +18,10 @@ def run_export():
 
     with sync_playwright() as p:
         try:
-            browser = p.chromium.connect_over_cdp(CDP_URL)
-            context = browser.contexts[0]
-            page = context.pages[0]
-            print("[OK] Connected via CDP.")
-        except Exception as e:
-            print(f"[FAIL] CDP connection failed: {e}")
-            print("Start Chrome with:  & \"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\" --remote-debugging-port=9222")
+            browser, page = connect(p)
+            print(f"[OK] Connected via CDP. Driving tab: {describe_page(page)}")
+        except BrowserConnectionError as e:
+            print(f"[FAIL] {e}")
             sys.exit(1)
 
         page.goto(PROJECT_URL, wait_until="domcontentloaded")
