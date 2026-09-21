@@ -107,7 +107,13 @@ def resolve_tar_path(explicit_path: Optional[str] = None) -> str:
     Priority:
     1) explicit_path argument,
     2) EDX_TAR_PATH env var,
-    3) newest file matching course*.tar.gz in cwd.
+    3) the only course*.tar.gz in cwd - and only if there is exactly one.
+
+    This used to take the newest by modification time when several matched.
+    That is not the same as the newest export: OneDrive rewrites mtimes on
+    sync, so the pick could change without any new export, silently, with
+    nothing in the output naming which file was read. Several archives now
+    means the caller has to say which one.
     """
     if explicit_path:
         return explicit_path
@@ -119,8 +125,26 @@ def resolve_tar_path(explicit_path: Optional[str] = None) -> str:
     candidates = [Path(p) for p in glob.glob("course*.tar.gz") if Path(p).is_file()]
     if not candidates:
         raise FileNotFoundError(
-            "No edX export found. Provide --tar, set EDX_TAR_PATH, or place course*.tar.gz in the project folder."
+            "No edX export found. Provide --tar, set EDX_TAR_PATH, or place "
+            "course*.tar.gz in the project folder."
         )
 
-    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    if len(candidates) > 1:
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        listing = "\n".join(
+            f"    {p.name}  ({p.stat().st_size / 1048576:.1f} MB, modified "
+            f"{_mtime(p)})" for p in candidates)
+        raise FileNotFoundError(
+            f"{len(candidates)} course archives are present and none was named:\n"
+            f"{listing}\n"
+            "  Pass --tar \"<file>\" (or set EDX_TAR_PATH) to say which to read.\n"
+            "  Picking by date is not safe here: OneDrive updates modification\n"
+            "  times on sync, so the newest file is not the newest export."
+        )
+
     return str(candidates[0])
+
+
+def _mtime(path: Path) -> str:
+    import datetime as _dt
+    return _dt.datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")

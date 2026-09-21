@@ -185,10 +185,12 @@ It lists every `course*.tar.gz` it can find with its hash and course root, shows
 `course_structure.json` records, and exits non-zero if that archive has gone missing or
 changed since it was parsed.
 
-**Note on automatic selection:** with no `--tar`, the newest `course*.tar.gz` by
-modification time is used. OneDrive updates mtimes on sync, so "newest" can mean "most
-recently synced" rather than "most recently exported". Pass `--tar` explicitly when it
-matters.
+**Note on automatic selection:** the code never names a particular archive. With no
+`--tar` and no `EDX_TAR_PATH`, it uses the only `course*.tar.gz` in the folder — and if
+there is more than one it **refuses and lists them** rather than choosing. It used to take
+the newest by modification time, which is not the newest export: OneDrive rewrites mtimes
+on sync, so the pick could change with no new export and nothing in the output naming what
+was read.
 
 ### Content the course page does not show
 
