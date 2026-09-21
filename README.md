@@ -16,9 +16,7 @@ python start_run.py
 
 It finds the export, confirms it really is a course archive, records which one it read,
 lists the modules, and prints the commands to run next. Run it at the start of every
-update: the two questions that have caused the most trouble here are *where does the
-export go* and *which one is being read*, and this answers both before any work happens.
-
+update.
 ```powershell
 pip install -r requirements.txt   # first time
 python preflight.py               # checks Python, ffmpeg, packages, branch, export
@@ -233,13 +231,6 @@ Update Study Buddy/
 - **Account:** Use the Chrome window started with `--remote-debugging-port=9222` and log in with the Google account that has editor access to the notebook.
 ### Deduplication is retired
 
-`--dedupe-current` no longer deletes anything. **A title does not identify a source.**
-
-Web sources are titled from the target page's `<title>`, and many pages share one. This
-notebook contains **seven** separate sources all titled `Microsoft Forms` — seven
-different forms, not seven copies. Deleting "duplicates" by title would destroy six of
-them. The information needed to tell a copy from a distinct source is the *content*,
-which the script cannot see.
 
 - `--dedupe-current --dry-run` still lists repeated titles, which is genuinely useful.
 - `--dedupe-current` prints that list, explains the above, and exits non-zero.
@@ -270,39 +261,6 @@ as ignored, never silently passed over.
 uploads it **to** edX, to update the course home page. This project **reads** a Studio
 *export* pulled **from** edX. Opposite directions, different trees, and nothing here
 calls anything there.
-
-They collide by filename. `New-EdxImportArchive.ps1` produces the exact name
-`course.tar.gz`, which `course*.tar.gz` matches, and it puts `course.xml` at the archive
-root — which is a layout this project accepts. So dropped into `course_exports/` it would
-be found, parsed and used to build study material from the wrong tree, without complaint.
-
-`start_run.py` and `preflight.py` therefore flag an archive named exactly
-`course.tar.gz`:
-
-```
-[WARN] This looks like an edXUpdater import archive, not a course
-       export - named exactly course.tar.gz.
-```
-
-A warning, not a refusal — the name is strong evidence, not proof, and an export may have
-been renamed. A Studio export carries a run id: `course.hp_m6v88.tar.gz`.
-
-**Keep edXUpdater's output out of `course_exports/`.**
-
-### Which archive did this come from?
-
-**Nothing is unpacked.** Every step reads the course straight out of the `.tar.gz`
-(`olx_archive.py`). This used to work differently: `extract_edx.py` unpacked into
-`edx_export/` and never cleared it, so extracting a second export left behind every file
-the first contained — producing a course whose structure came from one export and whose
-content came from another, with nothing recording which. That directory is gone, and with
-it the only way two exports could blend.
-
-`extract_edx.py` records what it read — path, size, a hash prefix, the course root inside
-the archive, and when it was read — into `course_structure.json` under `_source`. Every
-later step reopens **that same archive** rather than guessing again, and
-`build_module_pdf.py` and `preview_names.py` print it, so any generated document can be
-traced back to its export.
 
 To see what you have:
 
@@ -388,9 +346,7 @@ Three sources, cheapest first. All of them write `<video url_name>.txt` into
 | Teams recordings | export the VTT, drop it in `transcripts\` | manual, best quality for webinars |
 | Everything else (short clips) | `python tools\transcribe_videos.py --module 1` | local CPU time |
 
-`transcribe_videos.py` runs **entirely on your machine** — `AGENTS.md` forbids sending
-course content to a third-party service, so no cloud speech-to-text option exists here.
-It needs one of:
+`transcribe_videos.py` runs **entirely on your machine** — It needs one of:
 
 ```powershell
 pip install faster-whisper     # recommended: several times quicker on CPU
@@ -499,7 +455,6 @@ an existing `comparison_review.json`, since that file holds your edits.
 - **"No edX export found"** — Put the `.tar.gz` in `course_exports/` and run `python start_run.py`. Or pass `--tar <file>`, or set `EDX_TAR_PATH`.
 - **"N course archives ... and none was named"** — Two exports in one folder. Keep one, or name it: `--tar "<file>"`. It will not choose by date: OneDrive rewrites modification times on sync, so the newest file is not the newest export.
 - **"course_structure.json records no source archive"** — The structure predates provenance tracking, or came from a different export. Re-run `python extract_edx.py --tar "<file>"`. `--allow-stale` overrides, leaving provenance unverified.
-- **"This looks like an edXUpdater import archive"** — See "edXUpdater is a different tool" above.
 - **"course_structure.json not found"** — Run `extract_edx.py` (or `start_run.py`) first.
 - **`OMP: Error #15` / the process dies during transcription** — Two OpenMP runtimes. `transcribe_videos.py` sets `KMP_DUPLICATE_LIB_OK=TRUE` for its own run; if it still aborts, `set KMP_DUPLICATE_LIB_OK=TRUE` in the shell first.
 - **`ModuleNotFoundError` from a tool** — Run `python preflight.py`; it names every optional package and its `pip install`.
