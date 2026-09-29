@@ -32,6 +32,10 @@ EXPORTS_DIR = Path(os.getenv("EDX_EXPORTS_DIR", str(PROJECT_DIR / "course_export
 CURRENT_SOURCES_FILE = os.getenv("CURRENT_SOURCES_FILE", "current_sources.json")
 MANIFEST_PATH = os.getenv("PROCESSING_MANIFEST_PATH", "processing_manifest.json")
 REVIEW_PATH = os.getenv("COMPARISON_REVIEW_PATH", "comparison_review.json")
+# What each upload became in the notebook, so a re-run after a partial failure
+# retries only what did not arrive (upload_agent.py, upload_verify.py).
+UPLOAD_RESULTS_PATH = os.getenv("UPLOAD_RESULTS_PATH", "upload_results.json")
+UPLOAD_DEBUG_PATH = os.getenv("UPLOAD_DEBUG_PATH", "upload_verify_debug.json")
 
 # Transcripts arrive from several places - exported from Teams by hand, produced
 # by local speech-to-text, or shipped inside the OLX - so they share one store
