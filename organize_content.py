@@ -23,6 +23,7 @@ import html
 from config import (COURSE_STRUCTURE_PATH, DOWNLOAD_RETRIES, DOWNLOAD_TIMEOUT,
                     MANIFEST_PATH, ORGANIZED_CONTENT_DIR)
 from olx_archive import CourseArchiveError, open_for_structure
+from course_html import visible_text
 
 
 def slugify(text):
@@ -199,11 +200,16 @@ def audio_is_current(index, key, url, archive_sha):
     return entry.get("url") == url and entry.get("archive") == archive_sha
 
 
-def clean_html(html_content):
-    # Strip HTML tags and normalize whitespace
-    text = re.sub('<[^>]*>', ' ', html_content)
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
+def clean_html(html_content, stats=None):
+    """The component's visible text, by the same rules as the module PDFs.
+
+    This used to strip tags with a regex, which kept everything a tag holds:
+    screen-reader-only image descriptions (in both languages), script and style
+    bodies, undecoded entities. All of it went into the chapter text the
+    notebook receives. course_html leaves out hidden text and every form of
+    image description; see its docstring for the list.
+    """
+    return visible_text(html_content, stats)
 
 
 def organize_course(archive, output_dir, structure=None):
@@ -227,6 +233,7 @@ def organize_course(archive, output_dir, structure=None):
     manifest = []
     video_failures = []
     reused = rebuilt = 0
+    text_stats = {}
 
     for i, chapter in enumerate(structure["chapters"]):
         # Create a clean folder name for the chapter (match old scheme: 01_Welcome___What_..., not 01_1__Welcome_...)
@@ -245,7 +252,7 @@ def organize_course(archive, output_dir, structure=None):
                     if comp["type"] == "html":
                         raw = archive.read_text(f"html/{comp['url_name']}.html")
                         if raw is not None:
-                            merged_text.append(clean_html(raw))
+                            merged_text.append(clean_html(raw, text_stats))
                     
                     # 2. Process Video Content (Download & Convert)
                     elif comp["type"] == "video":
@@ -351,6 +358,11 @@ def organize_course(archive, output_dir, structure=None):
         json.dump(manifest, f, indent=4)
 
     total_files = sum(len(c["files"]) for c in manifest)
+    if text_stats.get("image_descriptions"):
+        print(f"[OK] Chapter text: {text_stats['image_descriptions']} image "
+              "description(s) and "
+              f"{text_stats.get('hidden_chars', 0)} character(s) of hidden text "
+              "left out.")
     if reused or rebuilt:
         print(f"[OK] Audio: {reused} reused from this export, "
               f"{rebuilt} rebuilt because they came from another.")

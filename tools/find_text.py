@@ -35,20 +35,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import COURSE_STRUCTURE_PATH  # noqa: E402
 from olx_archive import (CourseArchiveError, describe_source,  # noqa: E402
                          open_course_archive)
+from course_html import (HIDDEN_CLASS_RE, HIDDEN_STYLE_RE,  # noqa: E402
+                         parse_html)
 
 # Attributes that keep a component out of a student's view.
 VISIBILITY_ATTRS = ("visible_to_staff_only", "hide_from_toc", "start",
                     "visible_to_staff", "is_practice_exam", "entrance_exam_id")
 
-# Class and style patterns that hide text visually while leaving it for screen
-# readers. Bootstrap, edX's own theme and hand-rolled markup all appear here.
-HIDDEN_CLASS_RE = re.compile(
-    r"\b(sr-only|sr_only|screen-?reader(-only|-text)?|visually-?hidden|"
-    r"hidden|hide|a11y-?only|accessible-?text|invisible)\b", re.I)
-HIDDEN_STYLE_RE = re.compile(
-    r"display\s*:\s*none|visibility\s*:\s*hidden|"
-    r"(?:clip|position)\s*:\s*(?:rect\([^)]*\)|absolute)[^;]*|"
-    r"(?:left|top|text-indent)\s*:\s*-\d{4,}", re.I)
+# The hidden-text patterns come from course_html, the rules the outputs use.
+# This tool kept its own copy once, and the two drifted: it counted inline
+# clip:rect as hidden while the PDF printed that text.
+ALT_RE = re.compile(r"""\balt\s*=\s*(?:"([^"]*)"|'([^']*)')""", re.I)
 
 TAG_RE = re.compile(r"<[^>]+>")
 
@@ -117,6 +114,21 @@ def hidden_reason(tag_text):
     if re.search(r'aria-hidden\s*=\s*["\']true', tag_text, re.I):
         return "aria-hidden=true"
     return ""
+
+
+def output_verdict(html, needle):
+    """Whether *needle* reaches the generated documents, and if not, why."""
+    parser = parse_html(html)
+    shown = normalise(" ".join(text for _kind, text in parser.blocks)).lower()
+    if needle in shown:
+        return ("In the module PDF and notebook text: YES - this is text the "
+                "course page shows.")
+    for why, text in parser.removed:
+        if needle in normalise(text).lower():
+            return ("In the module PDF and notebook text: NO - left out as an "
+                    f"image description ({why}).")
+    return ("In the module PDF and notebook text: NO - hidden from sighted users; "
+            "only --include-hidden brings it back.")
 
 
 def walk_components(archive):
@@ -264,11 +276,14 @@ def main() -> int:
             for tag, why in reasons:
                 print(f"    <{tag}> {why}")
             print("  This is the screen-reader pattern: real content, deliberately")
-            print("  not shown to sighted users. The PDF keeps it because the parser")
-            print("  reads text, not stylesheets.")
+            print("  not shown to sighted users.")
         else:
             print("\n  CSS: nothing enclosing the match hides it.")
             print(f"  Enclosing tags: {' > '.join(t for t, _ in stack) or '(none)'}")
+
+        # The verdict that matters: does it reach the module PDF and the
+        # notebook text? Asked of the same parser they use, not re-derived.
+        print("\n  " + output_verdict(html, needle))
 
         start = max(0, offset - args.context // 2)
         print("\n  Raw HTML around the match:")
@@ -278,6 +293,21 @@ def main() -> int:
         print("  " + "-" * 66)
 
     if not hits:
+        # Alt text lives in an attribute, so the text search above cannot see
+        # it - and it is exactly the text a reader of an older PDF saw as
+        # "[Image: ...]".
+        for name in archive.listdir("html"):
+            html = archive.read_text(f"html/{name}") or ""
+            for match in ALT_RE.finditer(html):
+                alt = match.group(1) if match.group(1) is not None else match.group(2)
+                if needle in normalise(alt).lower():
+                    hits += 1
+                    print(f"\n  html/{name}: an image's alt text.")
+                    print("  Alt text is an image description, and is never written to")
+                    print("  the module PDFs or the notebook text.")
+        if hits:
+            print(f"\n[OK] {hits} alt text(s) contain that text.")
+            return 0
         print(f"\n[FAIL] {args.phrase!r} is in no html component of this archive.")
         print("       If it is in the PDF, the PDF was built from a different export.")
         return 1

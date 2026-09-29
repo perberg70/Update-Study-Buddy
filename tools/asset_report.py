@@ -78,11 +78,8 @@ def image_alts(body):
 def prose_words(body):
     """Visible words in a component, reusing the PDF's own HTML reader."""
     try:
-        from build_module_pdf import HtmlToBlocks
-        parser = HtmlToBlocks()
-        parser.feed(body)
-        parser.close()
-        return sum(len(text.split()) for _kind, text in parser.blocks)
+        from course_html import parse_html
+        return sum(len(text.split()) for _kind, text in parse_html(body).blocks)
     except Exception:
         return -1
 

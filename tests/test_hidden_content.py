@@ -37,7 +37,9 @@ FILES = {
         '<img src="/static/s.png" alt="Schedule image."/>'
         '<div class="sr-only"><h3>Historical reference</h3>'
         '<p>Spring 2026, not autumn.</p></div>'
-        '<p>Also on the page.</p>',
+        '<p>Also on the page.</p>'
+        # Hidden, but beside no image: ordinary screen-reader text.
+        '<span class="sr-only">Skip to the quiz</span>',
     "sequential/s2.xml": '<sequential display_name="Retired" visible_to_staff_only="true">'
                          '<vertical url_name="v2"/></sequential>',
     "vertical/v2.xml": '<vertical display_name="Old"><html url_name="staff"/></vertical>',
@@ -84,15 +86,23 @@ def main():
               "a hidden heading must not reach the document")
         check(failures, "Spring 2026, not autumn." not in blocks,
               "hidden body text must not reach the document")
-        check(failures, "[Image: Schedule image.]" in blocks,
-              "alt text is the only trace of an image in a text document")
+        # The images are drawn from the unit text, so their descriptions repeat
+        # it: alt text never appears, and neither does the hidden block after
+        # the image - the course's long-description pattern.
+        check(failures, "Schedule image." not in blocks and "[Image" not in blocks,
+              "alt text must not reach the document")
+        check(failures, stats.get("image_descriptions", 0) == 2,
+              f"alt text and the long description are both counted: {stats}")
         check(failures, stats.get("hidden_chars", 0) > 0,
-              "skipped text must be counted, not dropped silently")
+              "other skipped text must be counted, not dropped silently")
 
-        # 2. --include-hidden restores it.
+        # 2. --include-hidden restores hidden text - but not an image description.
         kept = texts(html_blocks(archive, "html/visible.html", include_hidden=True))
-        check(failures, "Spring 2026, not autumn." in kept,
+        check(failures, "Skip to the quiz" in kept,
               "--include-hidden must restore hidden text")
+        check(failures, "Spring 2026, not autumn." not in kept
+              and "Schedule image." not in kept,
+              "--include-hidden must not bring back an image description")
 
         # 3. A staff-only unit is recorded by the parser and skipped by the build.
         structure = extract_edx.parse_course(archive)

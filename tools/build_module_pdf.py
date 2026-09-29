@@ -24,7 +24,6 @@ import os
 import re
 import sys
 import xml.etree.ElementTree as ET
-from html.parser import HTMLParser
 from xml.sax.saxutils import escape as xml_escape
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -33,6 +32,8 @@ from config import (COURSE_STRUCTURE_PATH,  # noqa: E402
                     ORGANIZED_CONTENT_DIR, TRANSCRIPTS_DIR)
 from olx_archive import (CourseArchiveError, describe_source,  # noqa: E402
                          open_for_structure)
+from course_html import (HIDDEN_CLASS_RE, HIDDEN_STYLE_RE,  # noqa: E402,F401
+                         HtmlToBlocks, hides_content, parse_html, record)
 from asset_text import (asset_key, asset_text,  # noqa: E402
                         audio_source_id, linked_audio, linked_documents,
                         static_lookup)
@@ -93,30 +94,6 @@ def video_source_id(video_root):
         if url.endswith(".mp4"):
             return url
     return ""
-
-# Text hidden from sighted users but left for screen readers. It is real
-# content and correct markup, but it is not what the course page shows - and a
-# long image description read as body prose is actively confusing in a study
-# document. Skipped by default, restored with --include-hidden.
-HIDDEN_CLASS_RE = re.compile(
-    r"\b(sr-only|sr_only|screen-?reader(-only|-text)?|visually-?hidden|"
-    r"hidden|hide|a11y-?only|accessible-?text|invisible)\b", re.I)
-HIDDEN_STYLE_RE = re.compile(
-    r"display\s*:\s*none|visibility\s*:\s*hidden|"
-    r"(?:left|top|text-indent)\s*:\s*-\d{4,}", re.I)
-
-
-def hides_content(attrs):
-    """True when an element's own attributes keep it off the rendered page."""
-    values = dict(attrs)
-    if HIDDEN_CLASS_RE.search(values.get("class") or ""):
-        return True
-    if HIDDEN_STYLE_RE.search(values.get("style") or ""):
-        return True
-    if "hidden" in values:
-        return True
-    return (values.get("aria-hidden") or "").strip().lower() == "true"
-
 
 # --------------------------------------------------------------------------
 # Module grouping
@@ -188,119 +165,16 @@ def module_filename(module):
 # HTML -> blocks
 # --------------------------------------------------------------------------
 
-class HtmlToBlocks(HTMLParser):
-    """Turn course HTML into ('head'|'item'|'para', text) blocks.
-
-    Unlike a tag-stripping regex this drops script/style *content*, keeps
-    paragraph and list boundaries, and (via convert_charrefs) resolves entities
-    so no literal &amp; or &ouml; reaches the document.
-    """
-
-    SKIP = {"script", "style", "head", "title"}
-    VOID = {"br", "img", "hr", "input", "meta", "link", "area", "base",
-            "col", "embed", "param", "source", "track", "wbr"}
-    HEADINGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
-    BREAKS = {"p", "div", "section", "article", "br", "tr", "ul", "ol", "table", "blockquote"}
-
-    def __init__(self, include_hidden=False):
-        super().__init__(convert_charrefs=True)
-        self.blocks, self._buf, self._skip, self._kind, self._href = [], [], 0, "para", ""
-        self.include_hidden = include_hidden
-        # Depth counting, not a flag: nested elements inside a hidden one must
-        # not un-hide it when the inner element closes.
-        self._hidden_depth = 0
-        self._open = []
-        self.hidden_chars = 0
-
-    def _flush(self):
-        text = " ".join("".join(self._buf).split())
-        if text:
-            self.blocks.append((self._kind, text))
-        self._buf, self._kind = [], "para"
-
-    def handle_starttag(self, tag, attrs):
-        if tag in self.SKIP:
-            self._skip += 1
-            return
-        if self._skip:
-            return
-
-        if not self.include_hidden and tag not in self.VOID:
-            hiding = hides_content(attrs)
-            self._open.append((tag, hiding))
-            if hiding:
-                if not self._hidden_depth:
-                    self._flush()   # keep hidden text out of the block being built
-                self._hidden_depth += 1
-
-        if self._hidden_depth:
-            return
-
-        if tag in self.HEADINGS:
-            self._flush()
-            self._kind = "head"
-        elif tag == "li":
-            self._flush()
-            self._kind = "item"
-        elif tag in self.BREAKS:
-            self._flush()
-        elif tag == "img":
-            alt = dict(attrs).get("alt", "").strip()
-            if alt:
-                self._buf.append(f" [Image: {alt}] ")
-        elif tag == "a":
-            self._href = dict(attrs).get("href", "") or ""
-
-    def handle_endtag(self, tag):
-        if tag in self.SKIP:
-            self._skip = max(0, self._skip - 1)
-            return
-        if self._skip:
-            return
-
-        if not self.include_hidden and tag not in self.VOID:
-            for i in range(len(self._open) - 1, -1, -1):
-                if self._open[i][0] == tag:
-                    for _, hiding in self._open[i:]:
-                        if hiding:
-                            self._hidden_depth = max(0, self._hidden_depth - 1)
-                    del self._open[i:]
-                    break
-
-        if self._hidden_depth:
-            return
-
-        if tag == "a":
-            if self._href.startswith(("http://", "https://")):
-                self._buf.append(f" <{self._href}> ")
-            self._href = ""
-        elif tag in self.HEADINGS or tag == "li" or tag in self.BREAKS:
-            self._flush()
-
-    def handle_data(self, data):
-        if self._skip:
-            return
-        if self._hidden_depth:
-            self.hidden_chars += len(data.strip())
-            return
-        self._buf.append(data)
-
-    def close(self):
-        super().close()
-        self._flush()
-
-
 def html_blocks(archive, relpath, include_hidden=False, stats=None):
+    """Visible blocks of one component - course_html's rules, shared with the
+    notebook text, so the two outputs cannot disagree about what is on the page."""
     try:
-        parser = HtmlToBlocks(include_hidden=include_hidden)
-        parser.feed(archive.read_text(relpath) or "")
-        parser.close()
-        if stats is not None and parser.hidden_chars:
-            stats["hidden_text_components"] = stats.get("hidden_text_components", 0) + 1
-            stats["hidden_chars"] = stats.get("hidden_chars", 0) + parser.hidden_chars
-        return parser.blocks
+        parser = parse_html(archive.read_text(relpath) or "",
+                            include_hidden=include_hidden)
     except Exception as exc:
         return [("para", f"[could not read {os.path.basename(relpath)}: {exc}]")]
+    record(stats, parser)
+    return parser.blocks
 
 
 # --------------------------------------------------------------------------
@@ -794,7 +668,8 @@ def main() -> int:
                              "from static/ (included by default)")
     parser.add_argument("--include-hidden", action="store_true",
                         help="also include staff-only units and text hidden from "
-                             "sighted users (both are skipped by default)")
+                             "sighted users (both are skipped by default). Image "
+                             "descriptions stay out regardless")
     args = parser.parse_args()
 
     if not os.path.exists(COURSE_STRUCTURE_PATH):
@@ -916,6 +791,16 @@ def main() -> int:
     if stats["hidden_nodes"] or stats["hidden_text_components"]:
         print("     Re-run with --include-hidden to keep it, or trace one phrase with:")
         print('       python tools/find_text.py "<a phrase from the PDF>"')
+    if stats.get("image_descriptions"):
+        # Always left out: the images are drawn from the unit text, so their
+        # descriptions repeat it. Counted by kind, so an unexpected rule firing
+        # is visible here rather than as a paragraph quietly missing.
+        detail = ", ".join(f"{n} {why}" for why, n in
+                           sorted(stats["image_descriptions_by_reason"].items(),
+                                  key=lambda item: -item[1]))
+        print(f"\n     {stats['image_descriptions']} image description(s) left out: "
+              f"{detail}.")
+        print('     To see why a phrase is missing: python tools/find_text.py "<phrase>"')
     return 0
 
 

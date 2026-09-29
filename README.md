@@ -196,6 +196,7 @@ Update Study Buddy/
 │
 ├── config.py                     # Paths, URLs, limits, where the export is looked for
 ├── olx_archive.py                # Reads the OLX tree straight out of the .tar.gz
+├── course_html.py                # What a unit shows as text; leaves out image descriptions
 ├── extract_edx.py                # Parse .tar.gz (no unpacking) → course_structure.json
 ├── organize_content.py           # Build Organized_Course_Content/ + processing_manifest.json
 ├── compare_sources.py            # Compare & match → comparison_review.json; --apply runs it
@@ -303,7 +304,24 @@ generated document without ever being on the page:
   looks like content that contradicts the page.
 
 `build_module_pdf.py` skips both by default and **says what it skipped** — a silent drop
-would be as bad as a silent inclusion. `--include-hidden` keeps everything.
+would be as bad as a silent inclusion. `--include-hidden` keeps both.
+
+**Image descriptions are always left out**, in English and Swedish, from the module PDFs
+and from the notebook text alike — `--include-hidden` does not bring them back. The images
+are drawn from the unit text beside them, so a description repeats it. That covers alt
+text, hidden text beside an image or inside a figure, elements an image points to with
+`aria-describedby`, description classes (`image-description`, `bildbeskrivning`,
+`syntolkning`…), and disclosures or paragraphs labelled "Image description",
+"Bildbeskrivning", "Syntolkning", "Beskrivning av bilden" and the like. The label rules
+apply only where the component has an image, so "Image description: a cat on a
+skateboard" in a prompt-writing exercise stays. Visible captions stay too. Every build
+counts what it left out, by kind; to see where a phrase went:
+
+```powershell
+python tools\find_text.py "<phrase>"
+```
+
+The rules live in one place, `course_html.py`, which both outputs read through.
 
 ### Structure and content must come from the same export
 
