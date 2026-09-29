@@ -89,6 +89,151 @@ def backend_installed():
     return False
 
 
+# Course audio linked from unit HTML - the three .m4a files in the real course
+# are summaries and a briefing, 10 to 45 minutes long.
+EU = "EU AI Act for the public sector.m4a"
+AUDIO_FILES = {
+    "course.xml": '<course url_name="HT26"/>',
+    "course/HT26.xml": '<course><chapter url_name="c3"/></course>',
+    "chapter/c3.xml": '<chapter display_name="3. Use cases">'
+                      '<sequential url_name="s1"/><sequential url_name="s2"/></chapter>',
+    "sequential/s1.xml": '<sequential display_name="Public sector">'
+                         '<vertical url_name="v1"/></sequential>',
+    "vertical/v1.xml": '<vertical display_name="Listen">'
+                       '<html url_name="a"/><html url_name="b"/></vertical>',
+    # Linked twice, under edX's URL spelling; a document and an image beside it.
+    "html/a.html": '<a href="/static/EU_AI_Act_for_the_public_sector.m4a">listen</a>'
+                   '<a href="/static/Section_5.m4a">summary</a>'
+                   '<a href="/static/brief.pdf">brief</a>'
+                   '<img src="/static/diagram.png"/>',
+    "html/b.html": '<a href="/static/EU_AI_Act_for_the_public_sector.m4a">again</a>',
+    # A staff-only unit's audio is not on the page, so not transcribed.
+    "sequential/s2.xml": '<sequential display_name="Retired" visible_to_staff_only="true">'
+                         '<vertical url_name="v2"/></sequential>',
+    "vertical/v2.xml": '<vertical display_name="Old"><html url_name="old"/></vertical>',
+    "html/old.html": '<a href="/static/Hidden.m4a">old</a>',
+    "static/" + EU: "e" * 1000,
+    # 160000 bytes is ten seconds at the assumed bitrate - the estimate path.
+    "static/Section_5.m4a": "s" * 160000,
+    "static/brief.pdf": "not audio",
+    "static/diagram.png": "not audio",
+    "static/Hidden.m4a": "h",
+}
+
+
+def audio_cases(base, failures):
+    from asset_text import asset_key, audio_source_id
+    from build_module_pdf import record_transcript
+    import extract_edx
+
+    archive = open_archive(os.path.join(base, "course.audio.tar.gz"), AUDIO_FILES)
+    modules = group_modules(extract_edx.parse_course(archive)["chapters"])
+    store = os.path.join(base, "audio_store")
+    os.makedirs(store)
+
+    # ffprobe stands in: the EU file measures 40 minutes, Section_5 cannot be read.
+    probed = []
+
+    def probe(path):
+        probed.append(os.path.basename(path))
+        return {1000: 2400.0}.get(os.path.getsize(path))
+
+    def rows_for(**kw):
+        found = tv.plan(modules, archive, store, tv.DEFAULT_MAX_MINUTES,
+                        probe=probe, **kw)
+        return found, {r["url_name"]: r for r in found}
+
+    eu, s5 = asset_key(EU), asset_key("Section_5.m4a")
+    found, rows = rows_for(archive_sha="sha1")
+
+    check(failures, eu in rows and rows[eu]["kind"] == "audio" and rows[eu]["do"],
+          f"linked audio should be planned: {rows.get(eu)}")
+    # 40 minutes: over the 20-minute video limit, under the audio one. The two
+    # limits are separate on purpose.
+    check(failures, rows.get(eu, {}).get("duration") == 2400.0
+          and not rows[eu]["estimated"],
+          f"a probed length is measured, not estimated: {rows.get(eu)}")
+    check(failures, sum(1 for r in found if r["url_name"] == eu) == 1,
+          "linked from two components, still one recording")
+    check(failures, rows.get(s5, {}).get("do") and rows[s5]["estimated"]
+          and rows[s5]["duration"] == 10.0 and "estimated" in rows[s5]["why"],
+          f"an unmeasurable file is planned on a labelled estimate: {rows.get(s5)}")
+    check(failures, asset_key("Hidden.m4a") not in rows,
+          "audio in a staff-only unit must not be transcribed")
+    check(failures, all(r["kind"] == "audio" for r in found),
+          f"documents and images are not audio: {[r['title'] for r in found]}")
+
+    # A lowered audio limit skips it, and says which flag brings it back.
+    _, tight = rows_for(archive_sha="sha1", max_audio_minutes=30)
+    check(failures, not tight[eu]["do"] and "--max-audio-minutes" in tight[eu]["why"],
+          f"over the audio limit should name the flag: {tight[eu]['why']!r}")
+
+    # A current transcript is skipped - before the file is pulled out to measure.
+    with open(os.path.join(store, eu + ".txt"), "w", encoding="utf-8") as fh:
+        fh.write("already transcribed")
+    record_transcript(store, eu, "whisper", audio_source_id(archive, EU), "sha1")
+    del probed[:]
+    _, current = rows_for(archive_sha="sha1")
+    check(failures, not current[eu]["do"] and "already" in current[eu]["why"],
+          f"a current transcript should be kept: {current[eu]['why']!r}")
+    check(failures, len(probed) == 1,
+          f"only the untranscribed file should be measured, probed {len(probed)}")
+
+    # The same transcript from another export is stale, and redone.
+    _, other = rows_for(archive_sha="sha2")
+    check(failures, other[eu]["do"] and "another" in other[eu]["why"],
+          f"a transcript from another export should be redone: {other[eu]['why']!r}")
+
+    # --force redoes a current one, but never beats the limit.
+    _, forced = rows_for(archive_sha="sha1", force=True)
+    check(failures, forced[eu]["do"], "--force should re-transcribe")
+    _, forced_tight = rows_for(archive_sha="sha1", force=True, max_audio_minutes=30)
+    check(failures, not forced_tight[eu]["do"], "--force must not override the limit")
+
+    # The run itself, with the network made unusable: audio must still
+    # transcribe, which proves its bytes came from the archive.
+    saved = (tv.download_with_retry, tv.to_audio)
+
+    def no_network(*_a, **_k):
+        raise AssertionError("audio must not be downloaded")
+
+    def fake_to_audio(src, dest):
+        with open(src, "rb") as fh:
+            data = fh.read()
+        with open(dest, "wb") as out:
+            out.write(data)
+
+    heard = []
+
+    def fake_transcribe(wav):
+        with open(wav, "rb") as fh:
+            heard.append(fh.read())
+        return "Welcome to the section on the AI Act."
+
+    tv.download_with_retry, tv.to_audio = no_network, fake_to_audio
+    work = os.path.join(base, "work")
+    os.makedirs(work)
+    try:
+        ok = tv.transcribe_one(other[eu], archive, fake_transcribe, work, store, "sha2")
+    except AssertionError as exc:
+        ok = False
+        check(failures, False, str(exc))
+    finally:
+        tv.download_with_retry, tv.to_audio = saved
+
+    check(failures, ok and heard == [b"e" * 1000],
+          "the transcriber should hear the archive's own bytes")
+    with open(os.path.join(store, eu + ".txt"), encoding="utf-8") as fh:
+        check(failures, "AI Act" in fh.read(), "the transcript should be written")
+    with open(os.path.join(store, ".sources.json"), encoding="utf-8") as fh:
+        entry = json.load(fh).get(eu, {})
+    check(failures, entry.get("source") == audio_source_id(archive, EU)
+          and entry.get("archive") == "sha2",
+          f"provenance should name the file and the export: {entry}")
+    check(failures, os.listdir(work) == [],
+          f"temporary media should be removed: {os.listdir(work)}")
+
+
 def main():
     failures = []
     with tempfile.TemporaryDirectory() as base:
@@ -151,6 +296,9 @@ def main():
                 check(failures, False,
                       f"expected RuntimeError, got {type(exc).__name__}: {exc}")
 
+    with tempfile.TemporaryDirectory() as base:
+        audio_cases(base, failures)
+
     # Two OpenMP runtimes abort the process on Windows rather than raising, so
     # the variable has to be set before the backend is touched - the user had
     # to do it by hand, which is the bug.
@@ -184,6 +332,8 @@ def main():
         print("  [PASS] --force and --max-minutes behave; hidden units excluded")
         print("  [PASS] a missing backend explains the local install")
         print("  [PASS] KMP_DUPLICATE_LIB_OK set automatically, explicit value kept")
+        print("  [PASS] linked audio planned once, on its own limit; measured or")
+        print("         labelled as estimated; read from the archive, not the network")
     return not failures
 
 

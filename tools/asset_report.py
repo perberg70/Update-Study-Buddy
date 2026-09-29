@@ -35,9 +35,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import COURSE_STRUCTURE_PATH  # noqa: E402
 from olx_archive import (CourseArchiveError, describe_source,  # noqa: E402
                          open_course_archive)
-from build_module_pdf import group_modules, module_label  # noqa: E402
-from asset_text import (STATIC_REF_RE, build_lookup,  # noqa: E402
-                        pdf_backend, url_name)
+from build_module_pdf import (group_modules, module_label,  # noqa: E402
+                              select_modules)
+from asset_text import (AUDIO_SUFFIXES, STATIC_REF_RE,  # noqa: E402
+                        build_lookup, pdf_backend, url_name)
 
 # Transcript sidecars are already handled by the transcript resolver;
 # counting them here would bury the documents this is looking for.
@@ -46,10 +47,6 @@ TRANSCRIPT_SUFFIXES = (".srt", ".sjson", ".vtt")
 TEXT_READY = {".txt": "stdlib", ".md": "stdlib", ".csv": "stdlib",
               ".docx": "stdlib (zip + xml)", ".pdf": "needs pypdf or pdfminer.six",
               ".xlsx": "stdlib (zip + xml), cell text only"}
-
-# Audio uploaded as course material - an AI summary of a section, say. Speech,
-# so the existing local Whisper path applies rather than a document reader.
-AUDIO_SUFFIXES = (".m4a", ".mp3", ".wav", ".ogg", ".aac", ".flac")
 
 def pdf_reader_available():
     """Name of a PDF reader that actually works, or ''.
@@ -126,7 +123,7 @@ def classify(name, archive, pdf_lib):
     if name.lower().endswith(TRANSCRIPT_SUFFIXES):
         return "transcript", "already used by the transcript resolver"
     if ext in AUDIO_SUFFIXES:
-        return "audio", "speech - transcribable with the local Whisper path"
+        return "audio", "speech - python tools/transcribe_videos.py transcribes it"
     if ext in (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"):
         return "image", "no text - would need OCR"
     how = TEXT_READY.get(ext)
@@ -165,7 +162,7 @@ def main() -> int:
 
     modules = group_modules(structure.get("chapters", []))
     if args.module:
-        modules = [m for m in modules if (m["number"] or "") == args.module.strip()]
+        modules = select_modules(modules, args.module)
         if not modules:
             print(f"[FAIL] No module {args.module!r}.")
             return 1

@@ -83,6 +83,12 @@ def check_python() -> bool:
 def check_ffmpeg() -> bool:
     ok = shutil.which("ffmpeg") is not None
     print(f"[{'OK' if ok else 'FAIL'}] ffmpeg {'found' if ok else 'not found on PATH'}")
+    # ffprobe measures course audio before transcription. It ships with ffmpeg,
+    # and without it the length is estimated from size - so a warning, never a
+    # failure, and only worth saying when ffmpeg itself is there.
+    if ok and shutil.which("ffprobe") is None:
+        print("[WARN] ffprobe not found - course audio lengths will be estimated "
+              "from file size")
     return ok
 
 

@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import COURSE_STRUCTURE_PATH, TRANSCRIPTS_DIR  # noqa: E402
 from olx_archive import CourseArchiveError, open_for_structure  # noqa: E402
 from build_module_pdf import (group_modules, module_label,  # noqa: E402
+                              select_modules,
                               record_transcript, transcript_is_stale)
 from video_report import youtube_id  # noqa: E402
 
@@ -131,7 +132,7 @@ def main() -> int:
         structure = json.load(fh)
     modules = group_modules(structure.get("chapters", []))
     if args.module:
-        modules = [m for m in modules if (m["number"] or "") == args.module.strip()]
+        modules = select_modules(modules, args.module)
         if not modules:
             print(f"[FAIL] No module {args.module!r}.")
             return 1

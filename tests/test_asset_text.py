@@ -92,9 +92,11 @@ def built_story(base):
         # The handbook is linked from both components; it belongs in once.
         "html/a.html": '<p>Read the handbook.</p>'
                        '<a href="/static/Integrating_AI.docx">handbook</a>'
-                       '<img src="/static/picture.png" alt="A diagram."/>',
+                       '<img src="/static/picture.png" alt="A diagram."/>'
+                       '<a href="/static/Summary.m4a">listen</a>',
         "html/b.html": '<p>As above.</p>'
-                       '<a href="/static/Integrating_AI.docx">handbook again</a>',
+                       '<a href="/static/Integrating_AI.docx">handbook again</a>'
+                       '<a href="/static/Summary.m4a">listen again</a>',
     }
     path = os.path.join(base, "course.story.tar.gz")
     from _fixtures import make_archive
@@ -105,6 +107,7 @@ def built_story(base):
     extra = {
         "static/Integrating AI.docx": real_docx([["Integrating AI into teaching"]]),
         "static/picture.png": b"PNG bytes",
+        "static/Summary.m4a": b"audio bytes",
     }
     archive = repack(path, extra)
 
@@ -129,6 +132,40 @@ def built_story(base):
     check(out, "Integrating AI into teaching" not in
           " ".join(getattr(f, "text", "") for f in off),
           "--no-documents must leave the handbook out")
+
+    # Audio with no transcript yet: labelled, with the command that fixes it.
+    check(out, "Audio: Summary.m4a" in text,
+          "linked audio should be labelled in the module")
+    check(out, "transcribe_videos.py --module 1" in text,
+          "untranscribed audio should name the command, with this module")
+    check(out, stats.get("audio_untranscribed") == ["Summary.m4a"],
+          f"counted once though linked twice: {stats.get('audio_untranscribed')}")
+
+    # With a current transcript in the store, its text is in - once.
+    from asset_text import asset_key, audio_source_id
+    from build_module_pdf import record_transcript
+    store = os.path.join(base, "store")
+    os.makedirs(store)
+    key = asset_key("Summary.m4a")
+    with open(os.path.join(store, key + ".txt"), "w", encoding="utf-8") as fh:
+        fh.write("This summary covers driving change.")
+    sha = archive.fingerprint()["sha256"]
+    record_transcript(store, key, "whisper", audio_source_id(archive, "Summary.m4a"), sha)
+    stats = {}
+    heard = " ".join(getattr(f, "text", "") for f in
+                     module_story(module, archive, styles, stats, transcripts_dir=store))
+    check(out, heard.count("This summary covers driving change.") == 1
+          and stats.get("audio") == 1,
+          f"a current transcript belongs in the module, once: audio={stats.get('audio')}")
+
+    # From another export: not trusted, and said so.
+    record_transcript(store, key, "whisper", audio_source_id(archive, "Summary.m4a"),
+                      "another-export")
+    stats = {}
+    stale = " ".join(getattr(f, "text", "") for f in
+                     module_story(module, archive, styles, stats, transcripts_dir=store))
+    check(out, "driving change" not in stale and "ignored" in stale,
+          "a transcript from another export must not be used, and must say why")
     return out
 
 
@@ -159,6 +196,25 @@ def main():
     ]:
         check(failures, at.url_name(stored) == linked,
               f"{why}: got {at.url_name(stored)!r}, expected {linked!r}")
+
+    # asset_key: stable, and never reachable from a video title. The PDF builder
+    # also looks transcripts up by slugified title, and that slug can only hold
+    # [A-Za-z0-9_] - so a hyphenated key is out of its reach by construction.
+    import re
+    title_slug = lambda t: re.sub(r"_+", "_", re.sub(r"[^A-Za-z0-9]", "_", t)).strip("_")
+    for stored, key in [
+        ("EU AI Act for the public sector.m4a", "asset-EU_AI_Act_for_the_public_sector"),
+        ("AI Summary of Section 5 - Driving Change.m4a",
+         "asset-AI_Summary_of_Section_5_Driving_Change"),
+        ("AI_is_locking_out_junior_workers.m4a", "asset-AI_is_locking_out_junior_workers"),
+    ]:
+        check(failures, at.asset_key(stored) == key,
+              f"asset_key({stored!r}) = {at.asset_key(stored)!r}, expected {key!r}")
+    for hostile in ["asset-EU AI Act for the public sector", "asset EU_AI_Act",
+                    "EU AI Act for the public sector", "asset_EU_AI_Act"]:
+        check(failures, title_slug(hostile) != at.asset_key(hostile + ".m4a")
+              and "-" not in title_slug(hostile),
+              f"a video titled {hostile!r} must not reach an audio transcript")
 
     with tempfile.TemporaryDirectory() as base:
         pdf_bytes = real_pdf(["Prompts demo app builder",
@@ -233,6 +289,16 @@ def main():
         check(failures, "picture.png" not in found,
               "images are excluded - they are generated from the unit text")
 
+        # Audio is found the same way, and is not mistaken for a document.
+        audio_lookup = at.build_lookup(["Section 5.m4a", "notes.txt", "picture.png"])[0]
+        body = ('<a href="/static/Section_5.m4a">s</a><a href="/static/notes.txt">n</a>'
+                '<img src="/static/picture.png"/><a href="/static/Section_5.m4a">again</a>')
+        check(failures, at.linked_audio(body, audio_lookup) == ["Section 5.m4a"],
+              f"audio only, once: {at.linked_audio(body, audio_lookup)}")
+        check(failures, at.linked_documents(body, audio_lookup) == ["notes.txt"],
+              f"documents unchanged by the refactor: "
+              f"{at.linked_documents(body, audio_lookup)}")
+
         # End to end: a document linked from a unit reaches the module story,
         # an image does not, and an empty stats dict is enough - module_story
         # seeds what it counts rather than trusting its caller, so a counter
@@ -254,6 +320,8 @@ def main():
         print("  [PASS] edX link spelling resolved; oversized text truncated")
         print("  [PASS] a linked document reaches the module story, once, "
               "and --no-documents leaves it out")
+        print("  [PASS] linked audio: transcript in once, or a line naming the"
+              " command; stale refused; asset keys unreachable from titles")
     return not failures
 
 

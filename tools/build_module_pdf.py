@@ -33,12 +33,14 @@ from config import (COURSE_STRUCTURE_PATH,  # noqa: E402
                     ORGANIZED_CONTENT_DIR, TRANSCRIPTS_DIR)
 from olx_archive import (CourseArchiveError, describe_source,  # noqa: E402
                          open_for_structure)
-from asset_text import asset_text, linked_documents, static_lookup  # noqa: E402
+from asset_text import (asset_key, asset_text,  # noqa: E402
+                        audio_source_id, linked_audio, linked_documents,
+                        static_lookup)
 
 MODULE_NUMBER_RE = re.compile(r"^\s*(\d+)")
 NO_TRANSCRIPT = "[no transcript in export]"
 NO_TRANSCRIPT_STALE = ("[transcript ignored: it was generated from a different "
-                       "video or export - re-run the transcript tools]")
+                       "recording or export - re-run the transcript tools]")
 
 
 YOUTUBE_ATTRS = ("youtube_id_1_0", "youtube_id", "youtube")
@@ -146,6 +148,28 @@ def group_modules(chapters):
             first = module["chapters"][0].get("title", "")
             module["title"] = MODULE_NUMBER_RE.sub("", first).lstrip(". ").strip()
     return modules
+
+
+def select_modules(modules, wanted):
+    """Modules matching a --module argument: its number, else a title fragment.
+
+    Shared by every tool that takes --module, so the argument means the same
+    thing everywhere. Unnumbered chapters - "Final seminar - April 1st" - are
+    modules of their own and can only be named by title; a number-only match
+    left their content unreachable from every tool but this one.
+    """
+    wanted = (wanted or "").strip().lower()
+    if not wanted:
+        return list(modules)
+    by_number = [m for m in modules if (m["number"] or "").lower() == wanted]
+    return by_number or [m for m in modules if wanted in (m["title"] or "").lower()]
+
+
+def module_arg(module):
+    """What to pass as --module to name this module, quoted when it must be."""
+    if module["number"]:
+        return module["number"]
+    return f'"{module["title"]}"'
 
 
 def module_label(module):
@@ -603,10 +627,10 @@ def module_story(module, archive, styles, stats, unicode_ok=True,
     for key in ("units", "subunits", "html", "videos", "transcripts", "from_olx",
                 "from_store", "video_missing", "stale_transcripts",
                 "hidden_text_components", "hidden_chars", "documents",
-                "document_words"):
+                "document_words", "audio", "audio_words"):
         stats.setdefault(key, 0)
     stats.setdefault("skipped", {})
-    for key in ("hidden_nodes", "documents_unread"):
+    for key in ("hidden_nodes", "documents_unread", "audio_untranscribed"):
         stats.setdefault(key, [])
 
     story = [para(module_label(module), styles["title"])]
@@ -617,8 +641,10 @@ def module_story(module, archive, styles, stats, unicode_ok=True,
     # component that links them, which is the only place the course itself says
     # they belong - and only once per module, since a handbook is commonly
     # linked from several units.
-    lookup = static_lookup(archive) if include_documents else {}
+    lookup = static_lookup(archive)
     seen_documents = set()
+    seen_audio = set()
+    archive_sha = None   # hashed only if an audio transcript needs checking
 
     def skip(node, kind):
         """Record a node students cannot see, and say so rather than dropping it."""
@@ -680,6 +706,37 @@ def module_story(module, archive, styles, stats, unicode_ok=True,
                                     stats["documents_unread"].append((name, how))
                                     story.append(para(f"[not included: {how}]",
                                                       styles["video"]))
+
+                        # Linked audio: its transcript, from the store, under the
+                        # same key the transcriber wrote it with. Speech is
+                        # never read here - only text already transcribed.
+                        body = archive.read_text(relpath) or ""
+                        for name in linked_audio(body, lookup):
+                            if name in seen_audio:
+                                continue
+                            seen_audio.add(name)
+                            story.append(para(f"Audio: {name}", styles["inner"]))
+                            key = asset_key(name)
+                            text = stored_transcript(key, "", transcripts_dir)
+                            if text:
+                                if archive_sha is None:
+                                    archive_sha = archive.fingerprint()["sha256"]
+                                if transcript_is_stale(transcripts_dir, key,
+                                                       audio_source_id(archive, name),
+                                                       archive_sha):
+                                    text = ""
+                                    reason = NO_TRANSCRIPT_STALE
+                            else:
+                                reason = ("[no transcript yet - run: python "
+                                          "tools/transcribe_videos.py --module "
+                                          f"{module_arg(module)}]")
+                            if text:
+                                stats["audio"] += 1
+                                stats["audio_words"] += len(text.split())
+                                story.append(para(text, styles["body"]))
+                            else:
+                                stats["audio_untranscribed"].append(name)
+                                story.append(para(reason, styles["video"]))
 
                     elif ctype == "video":
                         title, text = video_entry(url_name, vert.get("title", ""),
@@ -761,10 +818,7 @@ def main() -> int:
             print("\nPass --module <number> to build one.")
         return 0
 
-    wanted = args.module.strip().lower()
-    chosen = [m for m in modules if (m["number"] or "").lower() == wanted]
-    if not chosen:
-        chosen = [m for m in modules if wanted in (m["title"] or "").lower()]
+    chosen = select_modules(modules, args.module)
     if len(chosen) != 1:
         print(f"[FAIL] {'No' if not chosen else 'Ambiguous'} module for {args.module!r}. "
               "Use --list to see the options.")
@@ -832,6 +886,14 @@ def main() -> int:
               f"({stats['document_words']} words)")
         for name, how in stats["documents_unread"]:
             print(f"       [not read] {name[:46]}: {how[:60]}")
+    if stats["audio"] or stats["audio_untranscribed"]:
+        print(f"     audio: {stats['audio']} transcribed "
+              f"({stats['audio_words']} words)")
+        for name in stats["audio_untranscribed"]:
+            print(f"       [no transcript] {name[:52]}")
+        if stats["audio_untranscribed"]:
+            print("       python tools/transcribe_videos.py --module "
+                  f"{module_arg(module)}")
     if stats["skipped"]:
         detail = ", ".join(f"{n} {t}" for t, n in sorted(stats["skipped"].items()))
         print(f"     not included: {detail}")

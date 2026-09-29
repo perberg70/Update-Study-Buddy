@@ -8,6 +8,11 @@ in the module PDF alongside the prose that links them.
 Images are deliberately not handled. On this course they are generated from the
 unit text they illustrate, so OCR would put the same sentences in twice.
 
+Audio is course material too - an AI summary of a section, say - but it is
+speech, so nothing here reads it. This module only finds it and names it:
+tools/transcribe_videos.py transcribes it locally into the transcript store
+under asset_key(), and tools/build_module_pdf.py reads it back by that key.
+
 PDF needs a third-party reader. Both candidates are tried, because neither can
 be relied on: pypdf and pdfminer both import `cryptography`, which is broken in
 some environments - a package that imports and then raises on use looks
@@ -62,15 +67,67 @@ def static_lookup(archive):
     return build_lookup(archive.listdir("static"))[0]
 
 
-def linked_documents(body, lookup):
-    """Stored names of the documents an HTML component links, in order."""
+# Audio uploaded as course material. Speech, so the local Whisper path applies
+# rather than a document reader.
+AUDIO_SUFFIXES = (".m4a", ".mp3", ".wav", ".ogg", ".aac", ".flac")
+
+
+def linked_static(body, lookup, accept):
+    """Stored names of the static files an HTML component links, in order.
+
+    *accept* decides which kinds count. Each file once, however often it is
+    linked; links to files absent from the archive are dropped here and
+    reported by tools/asset_report.py.
+    """
     out, seen = [], set()
     for link in STATIC_REF_RE.findall(body or ""):
         stored = lookup.get(link)
-        if stored and stored not in seen and is_document(stored):
+        if stored and stored not in seen and accept(stored):
             seen.add(stored)
             out.append(stored)
     return out
+
+
+def linked_documents(body, lookup):
+    """Stored names of the documents an HTML component links, in order."""
+    return linked_static(body, lookup, is_document)
+
+
+def linked_audio(body, lookup):
+    """Stored names of the audio files an HTML component links, in order."""
+    return linked_static(body, lookup, is_audio)
+
+
+def is_audio(name):
+    return name.lower().endswith(AUDIO_SUFFIXES)
+
+
+def asset_key(stored_name):
+    """The transcript-store key for a static audio file.
+
+    One definition, used by the transcriber to write and by the PDF builder to
+    read, so the two cannot drift apart.
+
+    The hyphen in the prefix is load-bearing. stored_transcript() also finds
+    transcripts by slugified video *title*, and that slug maps everything
+    outside [A-Za-z0-9] to an underscore - it can never contain a hyphen. So no
+    video title can ever resolve to an audio file's transcript, by construction.
+    """
+    stem = stored_name.rsplit(".", 1)[0] if "." in stored_name else stored_name
+    slug = re.sub(r"_+", "_", re.sub(r"[^A-Za-z0-9]", "_", stem)).strip("_")
+    return f"asset-{slug or 'unnamed'}"
+
+
+def audio_source_id(archive, stored_name):
+    """What a transcript of a static audio file was made from.
+
+    Recorded by the transcriber and compared by the PDF builder, so it is
+    defined once - the video equivalent once disagreed with itself between
+    writer and reader, and every transcript read as stale the moment it was
+    written. The archive's own hash, recorded beside this, is what catches a
+    new export; this catches a transcript filed under the wrong file.
+    """
+    return f"static/{stored_name}:{archive.size('static/' + stored_name)}"
 
 
 def pdf_backend():

@@ -29,16 +29,19 @@ python preflight.py               # checks Python, ffmpeg, packages, branch, exp
 - **Input:** An edX course export (`.tar.gz`) and your existing NotebookLM notebook.
 - **Output:** either
   - **module PDFs** — one structured PDF per module, units and subunits as headings, with
-    prose and video transcripts inline; or
+    prose, video transcripts, and the course's own documents and audio inline; or
   - **a synced notebook** — old sources removed and new ones added, by chapter: merged
     text files and MP3s from videos.
 - **Use case:** when the course is re-run or content changes, refresh the study material
   instead of re-uploading and cleaning up by hand.
 
-**Static assets are not uploaded.** `organize_content.py` copies PDFs/DOCX/XLSX from the
-course into `Organized_Course_Content/Global_Assets/`, but nothing adds them to the
-manifest, so they never reach the notebook. Copy them across by hand if you want them
-there. (Known gap, not yet fixed.)
+**Files the course uploads go into the module PDFs.** Handbooks, briefs and spreadsheets
+in the export's `static/` folder have their text placed under the unit that links them,
+and linked audio has its transcript placed there once `transcribe_videos.py` has made one.
+Images are left out on purpose: on this course they are drawn from the unit text they
+sit beside, so their words are already in the PDF. A file that no unit links has no
+module it clearly belongs to, so it is left out; `python tools/asset_report.py` lists
+those. The notebook-sync path still does not upload these files.
 
 ---
 
@@ -90,7 +93,7 @@ If any step fails (non-zero exit), the pipeline stops.
 - **Chrome** — only for the notebook-sync half, via remote debugging.
 - **An edX course export** in `course_exports/` (see Quick start).
 
-Three packages are optional, each enabling one feature. `python preflight.py` reports
+Four packages are optional, each enabling one feature. `python preflight.py` reports
 which are installed and what each does:
 
 | Package | Enables |
@@ -98,7 +101,8 @@ which are installed and what each does:
 | `playwright` | anything that drives the notebook (export / delete / upload) |
 | `reportlab` | module PDFs |
 | `youtube-transcript-api` | captions for YouTube-hosted videos |
-| `faster-whisper` | local transcription of short videos |
+| `faster-whisper` | local transcription of short videos and linked course audio |
+| `pypdf` | the text of PDFs the course carries, in module PDFs |
 
 ---
 
@@ -145,7 +149,9 @@ python run_full_update.py
 - `python tools/build_module_pdf.py --list` — list the modules.
 - `python tools/fetch_youtube_transcripts.py --module 1` — captions for YouTube videos.
 - `python tools/transcribe_videos.py --module 1 --dry-run` — what local transcription
-  would do, and roughly how long. Then drop `--dry-run` to run it.
+  would do for the module's videos and linked audio, and roughly how long. Then drop
+  `--dry-run` to run it. An unnumbered module is named by title:
+  `--module "final seminar"`.
 - `python tools/build_module_pdf.py --module 1` — build `Module_1.pdf`.
 
 **Sync the notebook** (needs Chrome on 9222)
@@ -208,7 +214,9 @@ Update Study Buddy/
 │
 ├── tools/
 │   ├── build_module_pdf.py       # One structured PDF per module
-│   ├── transcribe_videos.py      # Local Whisper for the short videos
+│   ├── transcribe_videos.py      # Local Whisper for short videos and linked audio
+│   ├── asset_text.py             # Text out of the course's own PDFs/DOCX/XLSX in static/
+│   ├── asset_report.py           # Which module each static/ file belongs to
 │   ├── fetch_youtube_transcripts.py
 │   ├── which_archive.py          # Which archive is in use, and is it unchanged
 │   ├── find_text.py              # Trace a phrase back to its course component
@@ -375,6 +383,15 @@ It transcribes only what nothing cheaper already covers, and only short videos �
 both faster and more accurate. Always start with `--dry-run`: it prints exactly which
 videos it would do, which it would skip and why, and a rough time estimate, without
 downloading anything.
+
+**Course audio.** Audio files a unit links from `static/` (a section summary, a briefing)
+are transcribed in the same run and land as `transcripts\asset-<name>.txt`. Their bytes
+come straight from the course archive, so nothing is downloaded. They have their own
+limit, `--max-audio-minutes` (default 60), because the video limit exists to keep out
+webinars that have a better source, and these files have none. Length comes from
+`ffprobe`, which ships with ffmpeg; without it the length is estimated from file size and
+the plan marks it `~`. On a typical CPU the `small` model runs at about a quarter of real
+time, so an hour and a half of audio is roughly 20–25 minutes of work.
 
 ### Video downloads
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Transcribe a module's short videos locally, into the transcript store.
+"""Transcribe a module's short videos and linked audio locally, into the transcript store.
 
 Runs entirely on this machine. Audio is never sent anywhere: AGENTS.md forbids
 disclosing course content to a third-party service without the course owner's
@@ -15,13 +15,20 @@ from YouTube captions, or dropped in by hand), and YouTube-hosted videos,
 which have no .mp4 to transcribe - use tools/fetch_youtube_transcripts.py for
 those.
 
-Results land as <url_name>.txt, which tools/build_module_pdf.py reads with no
-further configuration.
+Audio files the course carries in static/ and links from a unit's HTML - an AI
+summary of a section, say - are transcribed alongside the videos. Their bytes
+come straight out of the course archive, so nothing is downloaded. They have
+their own limit, --max-audio-minutes (default 60): they are material the course
+chose to include, where the video limit exists to keep hour-long webinars out.
+
+Results land as <url_name>.txt (videos) or asset-<name>.txt (audio), which
+tools/build_module_pdf.py reads with no further configuration.
 
 Usage:
     python tools/transcribe_videos.py --module 1 --dry-run
     python tools/transcribe_videos.py --module 1
     python tools/transcribe_videos.py --module 1 --model medium --max-minutes 30
+    python tools/transcribe_videos.py --module 3 --max-audio-minutes 90
 """
 
 from __future__ import annotations
@@ -39,13 +46,22 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import COURSE_STRUCTURE_PATH, TRANSCRIPTS_DIR  # noqa: E402
 from olx_archive import CourseArchiveError, open_for_structure  # noqa: E402
 from build_module_pdf import (group_modules, module_label,  # noqa: E402
+                              select_modules,
                               record_transcript, stored_transcript,
                               transcript_candidates, transcript_is_stale)
 from video_report import has_direct_mp4, parse_duration, youtube_id  # noqa: E402
 from organize_content import download_with_retry, human_size  # noqa: E402
+from asset_text import (asset_key, audio_source_id,  # noqa: E402
+                        linked_audio, static_lookup)
 
 DEFAULT_MODEL = "small"
 DEFAULT_MAX_MINUTES = 20.0
+DEFAULT_MAX_AUDIO_MINUTES = 60.0
+
+# When ffprobe cannot say, a length is estimated from size at this bitrate.
+# 128 kbps is typical for AAC speech - about a megabyte a minute - and the
+# plan labels the figure as an estimate, since a lower bitrate means longer.
+ASSUMED_AUDIO_BYTES_PER_SECOND = 16000
 
 # Rough CPU speed relative to real time, used only to state an estimate up
 # front. Wildly machine-dependent; it is a magnitude, not a promise.
@@ -62,9 +78,16 @@ def direct_mp4(video_root):
 
 
 def plan(modules, archive, transcripts_dir, max_minutes, force=False,
-         archive_sha=""):
-    """One row per video, each with a decision and the reason for it."""
+         archive_sha="", max_audio_minutes=DEFAULT_MAX_AUDIO_MINUTES,
+         probe=None):
+    """One row per video or linked audio file, each with a decision and why.
+
+    *probe* measures an audio file's length in seconds from a path, or returns
+    None; it defaults to ffprobe and exists so tests need no ffmpeg.
+    """
     rows = []
+    lookup = static_lookup(archive)
+    seen_audio = set()
     for module in modules:
         for chapter in module["chapters"]:
             if chapter.get("hidden"):
@@ -76,18 +99,103 @@ def plan(modules, archive, transcripts_dir, max_minutes, force=False,
                     if vert.get("hidden"):
                         continue
                     for comp in vert.get("components", []):
-                        if comp.get("type") != "video":
-                            continue
-                        rows.append(_classify(comp, vert, archive, transcripts_dir,
-                                              max_minutes, force, archive_sha))
+                        if comp.get("type") == "video":
+                            rows.append(_classify(comp, vert, archive,
+                                                  transcripts_dir, max_minutes,
+                                                  force, archive_sha))
+                        elif comp.get("type") == "html":
+                            body = archive.read_text(
+                                f"html/{comp.get('url_name')}.html") or ""
+                            for name in linked_audio(body, lookup):
+                                # Once per run: a summary linked from three
+                                # units is still one recording.
+                                if name in seen_audio:
+                                    continue
+                                seen_audio.add(name)
+                                rows.append(_classify_audio(
+                                    name, archive, transcripts_dir,
+                                    max_audio_minutes, force, archive_sha, probe))
     return rows
+
+
+def ffprobe_seconds(path):
+    """Length of a media file in seconds, or None when ffprobe cannot say."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, check=False, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    try:
+        seconds = float((result.stdout or b"").decode().strip())
+    except ValueError:
+        return None
+    return seconds if seconds > 0 else None
+
+
+def measure_audio(archive, stored_name, probe=None):
+    """(seconds, measured) for a static audio file.
+
+    measured is False when the figure is an estimate from size - ffprobe
+    missing, or unable to read the file. Never raises: an unmeasurable file is
+    planned on its estimate and says so, rather than being skipped or crashing
+    the plan.
+    """
+    import tempfile
+    probe = probe or ffprobe_seconds
+    relpath = f"static/{stored_name}"
+    ext = os.path.splitext(stored_name)[1] or ".audio"
+    seconds = None
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "probe" + ext)
+            if archive.extract_to(relpath, path):
+                seconds = probe(path)
+    except Exception:
+        seconds = None
+    if seconds:
+        return float(seconds), True
+    size = max(archive.size(relpath), 0)
+    return size / ASSUMED_AUDIO_BYTES_PER_SECOND, False
+
+
+def _classify_audio(stored_name, archive, transcripts_dir, max_audio_minutes,
+                    force, archive_sha="", probe=None):
+    key = asset_key(stored_name)
+    source = audio_source_id(archive, stored_name)
+    row = {"kind": "audio", "url_name": key, "title": stored_name,
+           "asset": stored_name, "source": source, "duration": 0.0,
+           "estimated": False, "url": "", "do": False, "why": ""}
+
+    # Before measuring: measuring means pulling the file out of the archive,
+    # which a finished transcript makes pointless.
+    if not force and stored_transcript(key, "", transcripts_dir):
+        if transcript_is_stale(transcripts_dir, key, source, archive_sha):
+            row["why"] = "existing transcript is from another file or export"
+        else:
+            row["why"] = f"transcript already in {transcripts_dir}/"
+            return row
+
+    seconds, measured = measure_audio(archive, stored_name, probe)
+    row["duration"], row["estimated"] = seconds, not measured
+    if seconds > max_audio_minutes * 60:
+        row["why"] = (f"{seconds / 60:.0f} min, over the {max_audio_minutes:.0f} min "
+                      f"audio limit - re-run with --max-audio-minutes "
+                      f"{int(seconds / 60) + 5}")
+        return row
+    if not measured:
+        row["why"] = row["why"] or "length estimated from size - ffprobe missing or unable to read it"
+    row["do"] = True
+    return row
 
 
 def _classify(comp, vert, archive, transcripts_dir, max_minutes, force,
               archive_sha=""):
     url_name = comp.get("url_name")
-    row = {"url_name": url_name, "title": url_name, "duration": 0.0,
-           "url": "", "do": False, "why": ""}
+    row = {"kind": "video", "url_name": url_name, "title": url_name,
+           "duration": 0.0, "url": "", "do": False, "why": ""}
 
     xml = archive.read_text(f"video/{url_name}.xml")
     if xml is None:
@@ -132,6 +240,7 @@ def _classify(comp, vert, archive, transcripts_dir, max_minutes, force,
         row["why"] = "no duration in the xml - length unknown, transcribing anyway"
 
     row["url"] = direct_mp4(root)
+    row["source"] = row["url"]
     row["do"] = True
     return row
 
@@ -214,12 +323,70 @@ def hhmm(seconds):
             else f"{seconds // 60}m{seconds % 60:02d}s")
 
 
+def fetch_source(row, archive, dest):
+    """Put a row's media at *dest*; return its size in bytes.
+
+    Audio comes straight out of the course archive: nothing is downloaded, and
+    the file never leaves this machine. Only videos touch the network.
+    """
+    if row["kind"] == "audio":
+        print("    reading from the course archive...", flush=True)
+        if not archive.extract_to(f"static/{row['asset']}", dest):
+            raise RuntimeError("not in the archive")
+        return os.path.getsize(dest)
+    print("    downloading...", flush=True)
+    return download_with_retry(row["url"], dest)
+
+
+def transcribe_one(row, archive, transcribe, work, transcripts_dir, archive_sha,
+                   keep_audio=False):
+    """Fetch, convert, transcribe and record one row. True when text was written.
+
+    Raises on failure; the caller counts it. Temporary media is removed either
+    way, and the .wav too unless *keep_audio*.
+    """
+    ext = (os.path.splitext(row["asset"])[1] or ".audio") if row["kind"] == "audio" \
+        else ".mp4"
+    source = os.path.join(work, f"{row['url_name']}{ext}")
+    wav = os.path.join(work, f"{row['url_name']}.wav")
+    out = os.path.join(transcripts_dir, f"{row['url_name']}.txt")
+    started = time.time()
+    try:
+        written = fetch_source(row, archive, source)
+        print(f"    converting {human_size(written)} to 16 kHz mono...", flush=True)
+        to_audio(source, wav)
+        print("    transcribing (this is the slow part)...", flush=True)
+        text = transcribe(wav)
+        if not text.strip():
+            print("    [none] no speech recognised - nothing written")
+            return False
+        with open(out, "w", encoding="utf-8") as fh:
+            fh.write(text.strip())
+        record_transcript(transcripts_dir, row["url_name"], "whisper",
+                          row["source"], archive_sha)
+        print(f"    [OK] {len(text.split())} words in {hhmm(time.time() - started)}"
+              f" -> {out}")
+        return True
+    finally:
+        for leftover in [source, source + ".part"] + ([] if keep_audio else [wav]):
+            if os.path.exists(leftover):
+                try:
+                    os.remove(leftover)
+                except OSError:
+                    pass
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--module", help="module number (default: every module)")
     parser.add_argument("--max-minutes", type=float, default=DEFAULT_MAX_MINUTES,
                         help=f"longest video to transcribe (default {DEFAULT_MAX_MINUTES:.0f})")
+    parser.add_argument("--max-audio-minutes", type=float,
+                        default=DEFAULT_MAX_AUDIO_MINUTES,
+                        help="longest linked audio file to transcribe (default "
+                             f"{DEFAULT_MAX_AUDIO_MINUTES:.0f}); separate from the "
+                             "video limit, which keeps webinars out")
     parser.add_argument("--model", default=DEFAULT_MODEL,
                         help=f"whisper model size (default {DEFAULT_MODEL})")
     parser.add_argument("--transcripts-dir", default=TRANSCRIPTS_DIR)
@@ -246,7 +413,7 @@ def main() -> int:
 
     modules = group_modules(structure.get("chapters", []))
     if args.module:
-        modules = [m for m in modules if (m["number"] or "") == args.module.strip()]
+        modules = select_modules(modules, args.module)
         if not modules:
             print(f"[FAIL] No module {args.module!r}.")
             return 1
@@ -259,20 +426,29 @@ def main() -> int:
 
     archive_sha = archive.fingerprint()["sha256"]
     rows = plan(modules, archive, args.transcripts_dir, args.max_minutes,
-                args.force, archive_sha)
+                args.force, archive_sha, max_audio_minutes=args.max_audio_minutes)
     todo = [r for r in rows if r["do"]]
     skipped = [r for r in rows if not r["do"]]
 
     print(f"\n{module_label(modules[0]) if len(modules) == 1 else f'{len(modules)} modules'}")
-    print(f"  {len(rows)} video(s): {len(todo)} to transcribe, {len(skipped)} skipped\n")
+    videos = sum(1 for r in rows if r["kind"] == "video")
+    audio = len(rows) - videos
+    what = f"{videos} video(s)" + (f" and {audio} audio file(s)" if audio else "")
+    print(f"  {what}: {len(todo)} to transcribe, {len(skipped)} skipped\n")
+
+    def shown(row):
+        return (f"{row['title'][:46]}  (audio)" if row["kind"] == "audio"
+                else row["title"][:54])
 
     for row in todo:
         length = hhmm(row["duration"]) if row["duration"] else "length unknown"
-        print(f"  [do]   {length:>7}  {row['title'][:54]}")
-        if not row["duration"]:
+        if row.get("estimated"):
+            length = "~" + length
+        print(f"  [do]   {length:>7}  {shown(row)}")
+        if row["why"]:
             print(f"  {'':14}  {row['why']}")
     for row in skipped:
-        print(f"  [skip] {'':7}  {row['title'][:54]}")
+        print(f"  [skip] {'':7}  {shown(row)}")
         print(f"  {'':14}  {row['why']}")
 
     if not todo:
@@ -306,40 +482,16 @@ def main() -> int:
 
     done = failed = 0
     for index, row in enumerate(todo, start=1):
-        label = row["title"][:48]
-        print(f"\n  ({index}/{len(todo)}) {label}")
-        mp4 = os.path.join(work, f"{row['url_name']}.mp4")
-        wav = os.path.join(work, f"{row['url_name']}.wav")
-        out = os.path.join(args.transcripts_dir, f"{row['url_name']}.txt")
-        started = time.time()
+        print(f"\n  ({index}/{len(todo)}) {row['title'][:48]}")
         try:
-            print("    downloading...", flush=True)
-            written = download_with_retry(row["url"], mp4)
-            print(f"    converting {human_size(written)} to 16 kHz mono...", flush=True)
-            to_audio(mp4, wav)
-            print("    transcribing (this is the slow part)...", flush=True)
-            text = transcribe(wav)
-            if not text.strip():
-                print("    [none] no speech recognised - nothing written")
+            if transcribe_one(row, archive, transcribe, work, args.transcripts_dir,
+                              archive_sha, keep_audio=args.keep_audio):
+                done += 1
+            else:
                 failed += 1
-                continue
-            with open(out, "w", encoding="utf-8") as fh:
-                fh.write(text.strip())
-            record_transcript(args.transcripts_dir, row["url_name"], "whisper",
-                              row["url"], archive_sha)
-            done += 1
-            print(f"    [OK] {len(text.split())} words in {hhmm(time.time() - started)}"
-                  f" -> {out}")
         except Exception as exc:
             failed += 1
             print(f"    [FAIL] {type(exc).__name__}: {str(exc).splitlines()[0][:100]}")
-        finally:
-            for leftover in ([mp4, mp4 + ".part"] + ([] if args.keep_audio else [wav])):
-                if os.path.exists(leftover):
-                    try:
-                        os.remove(leftover)
-                    except OSError:
-                        pass
 
     if not args.keep_audio:
         try:
@@ -350,7 +502,10 @@ def main() -> int:
     print(f"\n  transcribed {done}, failed {failed}")
     if done:
         print(f"  Re-run build_module_pdf.py to fold them into the PDF:")
-        print(f"    python tools/build_module_pdf.py --module {args.module or '<n>'}")
+        which = args.module or "<n>"
+        if any(c.isspace() for c in which):
+            which = f'"{which}"'
+        print(f"    python tools/build_module_pdf.py --module {which}")
     return 1 if failed else 0
 
 

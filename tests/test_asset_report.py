@@ -132,9 +132,10 @@ def main():
         check(failures, one["handbook.pdf"][0]["alt"] == "",
               "a non-image link has no alt text")
 
-        # Course audio is speech, so the Whisper path applies, not a doc reader.
+        # Course audio is speech, so the local transcriber applies, not a doc
+        # reader - and the report names the command, not just the idea.
         kind, how = ar.classify("Section 5 summary.m4a", archive, pdf_lib)
-        check(failures, kind == "audio" and "Whisper" in how,
+        check(failures, kind == "audio" and "transcribe_videos.py" in how,
               f"an .m4a is transcribable audio, got {kind}/{how}")
 
         # Two stored names collapsing to one link is ambiguous and must be said.

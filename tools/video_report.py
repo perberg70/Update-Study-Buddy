@@ -35,6 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import COURSE_STRUCTURE_PATH  # noqa: E402
 from olx_archive import CourseArchiveError, open_course_archive  # noqa: E402
 from build_module_pdf import (group_modules, module_label,  # noqa: E402
+                              select_modules,
                               transcript_candidates, youtube_id)
 
 def parse_duration(video_root):
@@ -114,7 +115,7 @@ def main() -> int:
     with open(COURSE_STRUCTURE_PATH, "r", encoding="utf-8") as fh:
         modules = group_modules(json.load(fh).get("chapters", []))
     if args.module:
-        modules = [m for m in modules if (m["number"] or "") == args.module.strip()]
+        modules = select_modules(modules, args.module)
         if not modules:
             print(f"[FAIL] No module {args.module!r}.")
             return 1
