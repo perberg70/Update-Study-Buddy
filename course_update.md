@@ -1,23 +1,54 @@
 ---
-description: Autonomously processes a new edX course .tar.gz export, compares with current NotebookLM sources, removes old sources, and uploads new ones.
+description: Processes a new edX course .tar.gz export, compares with current NotebookLM sources, removes old sources, and uploads new ones.
 ---
 
-**Critical Authentication Mandate:** Whenever you use your Browser Agent to interact with NoteBookLM, you are strictly bound to using [perberg70@gmail.com]. If presented with a Google Account selection screen, you must explicitly locate and click that specific email address. Do NOT default to the university account or any other profile.
+**Authentication:** when driving NotebookLM through a browser agent, use the Google
+account that owns the notebook. If an account chooser appears, pick that one explicitly
+rather than defaulting to whichever profile is first.
 
-**Critical Authentication Mandate:** Whenever interacting with NoteBookLM, you are strictly bound to using [perberg70@gmail.com].
+## Start here, every run
 
-1. **Automation Pipeline**: Execute `python run_full_update.py` in the terminal (with Chrome started as `chrome.exe --remote-debugging-port=9222`). This master script coordinates:
-   - `export_current_sources.py`: Connects via CDP, opens the notebook, scrapes the current source names from the sidebar, and writes `current_sources.json`. This keeps the list up to date at the start of every run.
-   - `extract_edx.py`: Unpacks the `.tar.gz`.
-   - `organize_content.py`: Downloads videos (fixing 403 errors), converts to MP3, and structures text by chapter.
-   - `compare_sources.py`: Compares new sources (from `processing_manifest.json`) with current NotebookLM sources (from `current_sources.json`). Writes `comparison_review.json` with ADD (new) vs REPLACE (old name to remove). **Requires** `current_sources.json` (no built-in list).
-   - `delete_agent.py`: Connects via CDP, opens the notebook, and removes each source marked REPLACE in the comparison review (More -> Remove source -> Delete).
-   - `upload_agent.py`: Uploads all new sources to NoteBookLM (Upload files for documents/audio, Websites for URLs, Copied text for pasted content).
+```
+python start_run.py
+```
 
-2. **current_sources.json**: Written by `export_current_sources.py` at the start of each full update. It is the single source of truth for "current notebook sources"; compare_sources.py requires it and no longer uses a built-in default list.
+It reports where the course export goes (`course_exports/`), finds it, refuses to guess
+between two, records which one it read, and prints the commands to run next.
 
-3. **Monitoring**: Watch the terminal output for progress.
-4. **Verification**: Once complete, verify that old sources were removed and new text/audio sources are visible in the NoteBookLM UI.
+## The pipeline
 
+`python run_full_update.py` with Chrome started as
+`chrome.exe --remote-debugging-port=9222`:
 
-- Upload size behavior is configurable via `MAX_UPLOAD_SIZE_MB` and `ENFORCE_UPLOAD_SIZE_LIMIT` (env vars or `config.py`).
+- `export_current_sources.py` — scrapes the notebook's Sources panel over CDP into
+  `current_sources.json`. It fails loudly rather than writing a list it cannot vouch for.
+- `extract_edx.py` — parses the `.tar.gz` into `course_structure.json`, recording which
+  archive it read. **It does not unpack anything**; every later step reads the archive
+  directly, so two exports cannot blend.
+- `organize_content.py` — downloads videos, converts to MP3, structures text by chapter.
+- `compare_sources.py` — matches new files against current sources and writes
+  `comparison_review.json` with a suggested action per row. Requires
+  `current_sources.json`.
+- `delete_agent.py` — removes sources marked for deletion. Exact-title matching by
+  default; `--fuzzy` is opt-in and unsafe.
+- `upload_agent.py` — uploads the new sources.
+
+A review pause sits between the two halves: `comparison_review.json` is yours to edit,
+and the concrete delete list is printed before anything is applied.
+
+## Module PDFs
+
+Separate from the pipeline above, and the direction this is heading:
+
+```
+python tools/build_module_pdf.py --module 1
+```
+
+One structured PDF per module — units and subunits as headings, prose and video
+transcripts inline — instead of many fragment sources. See `README.md`.
+
+## Notes
+
+- Upload size is configurable via `MAX_UPLOAD_SIZE_MB` and `ENFORCE_UPLOAD_SIZE_LIMIT`.
+- Deduplication by title is retired: identical titles do not imply identical content.
+  See "Deduplication is retired" in `README.md`.

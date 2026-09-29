@@ -4,6 +4,8 @@ Usage:
     python compare_sources.py            # Generate comparison_review.json
     python compare_sources.py --apply    # Apply reviewed plan (delete + upload)
 """
+import argparse
+import datetime
 import json
 import os
 import re
@@ -15,7 +17,40 @@ from config import CURRENT_SOURCES_FILE, MANIFEST_PATH, REVIEW_PATH
 import config as app_config
 
 STOP_WORDS = {"and", "the", "of", "in", "to", "a", "is", "for", "with", "on", "by", "an", "at", "or", "its"}
+
+# Below MATCH_THRESHOLD a pair is not written at all. Between the two, the pair is
+# written but defaults to KEEP - visible as a suggestion, not acted on. At or above
+# HIGH_CONFIDENCE it defaults to REPLACE. An exact name match scores ~0.8, so real
+# replacements still default correctly while near-misses need a deliberate edit.
 MATCH_THRESHOLD = 0.35
+HIGH_CONFIDENCE = 0.75
+
+# Sources uploaded by an earlier workflow carry the chapter title as a prefix:
+#   "2 Learning with AI - Learning_Mode_Short_Demo.mp3"
+# while organize_content.py generates just "Learning_Mode_Short_Demo.mp3". The
+# blended score dilutes that to ~0.6, because the prefix contributes words the
+# generated name cannot have - measured on the real notebook, 0 of 28 files
+# cleared HIGH_CONFIDENCE despite 23 matching correctly. Recognising the
+# structure directly is more precise than trying to tune the blend around it.
+SUFFIX_MATCH_SCORE = 0.9
+MIN_SUFFIX_WORDS = 3
+
+# Unmatched rows carry a pointer to their nearest counterpart, purely as context
+# for the human reviewer. Below this the "nearest" is meaningless and would be
+# noise across a hundred-odd unmatched web links, so it is omitted. A display
+# threshold only: being slightly off costs a missing or surplus hint, never an
+# action. Calibrated on real data, where true re-recordings scored 0.29-0.33 and
+# the nearest unrelated pair scored 0.22.
+CROSS_REF_FLOOR = 0.25
+
+# Chapters get renumbered between course runs: 04_What_AI_is... becomes
+# 07_What_AI_is.... The filename body is unchanged, only the leading number
+# moved, so the suffix rule misses it. Matching on the body requires it to be
+# *exactly* equal - not merely similar - which is why this cannot pair two
+# genuinely different chapters that happen to share vocabulary.
+CHAPTER_NUMBER_RE = re.compile(r"^\d+[\s_.\-]*")
+MIN_RENUMBER_CHARS = 10
+MIN_RENUMBER_WORDS = 2
 
 
 def load_current_sources():
@@ -59,6 +94,45 @@ def normalize(s):
 def significant_words(text):
     words = set(re.findall(r"[a-z0-9]+", text.lower()))
     return words - STOP_WORDS
+
+
+def is_title_suffix(new_name, old_name):
+    """True when *old_name* is *new_name* carrying a prefix.
+
+    Requires at least MIN_SUFFIX_WORDS significant words so a short generic
+    name ("Video.mp3") cannot suffix-match many unrelated titles, and requires
+    a word boundary so "demo.mp3" does not match "...short_demo.mp3".
+    """
+    na, nb = normalize(new_name), normalize(old_name)
+    if not na or not nb or na == nb:
+        return False
+    if len(significant_words(na)) < MIN_SUFFIX_WORDS:
+        return False
+    return nb.endswith(" " + na)
+
+
+def strip_chapter_number(name):
+    """Drop a leading chapter number: '07_What_AI_is' -> 'What_AI_is'.
+
+    Deliberately does not consume a trailing letter, so '03B_Track_Academia'
+    and '05_B_Track_Academia' both reduce to the same body.
+    """
+    return CHAPTER_NUMBER_RE.sub("", (name or "").strip())
+
+
+def is_renumbered_match(new_name, old_name):
+    """True when the names differ only by a leading chapter number.
+
+    Compares against the last ' - ' segment of the old title, which is the
+    filename portion of a chapter-prefixed source.
+    """
+    body = normalize(strip_chapter_number(new_name))
+    if len(body) < MIN_RENUMBER_CHARS:
+        return False
+    if len(significant_words(body)) < MIN_RENUMBER_WORDS:
+        return False
+    tail = (old_name or "").rsplit(" - ", 1)[-1]
+    return body == normalize(strip_chapter_number(tail))
 
 
 def name_similarity(a, b):
@@ -110,7 +184,24 @@ def compute_match_score(new_file, old_name):
             hits = len(old_words & content_kw)
             content_boost = min(hits / max(len(old_words), 1) * 0.15, 0.15)
 
-    score = max(sim * 0.5 + w_overlap * 0.3 + ch_overlap * 0.05 + content_boost, sim)
+    # Weighted score only. This used to be max(weighted, sim), which made the two
+    # signals independent triggers rather than one judgement: raw character
+    # similarity alone could pair names with no words in common.
+    score = sim * 0.5 + w_overlap * 0.3 + ch_overlap * 0.05 + content_boost
+
+    # Unlike the removed max(weighted, sim), neither of these is a general
+    # similarity escape hatch: each fires only on an exact structural relation.
+    if is_renumbered_match(new_name, old_name):
+        score = max(score, SUFFIX_MATCH_SCORE + ch_overlap * 0.05)
+
+    if is_title_suffix(new_name, old_name):
+        # Keep the chapter signal on top rather than flattening to a constant:
+        # the same video can appear in two chapters ("3A Track ..." and
+        # "3B Track Academia"), and both suffix-match. Without this the scores
+        # tie and the pairing is decided by manifest order rather than by which
+        # chapter the file actually came from.
+        score = max(score, SUFFIX_MATCH_SCORE + ch_overlap * 0.05)
+
     return round(min(score, 1.0), 3)
 
 
@@ -118,6 +209,10 @@ def match_reason(new_name, old_name, score):
     na, nb = normalize(new_name), normalize(old_name)
     if na == nb:
         return "exact name match"
+    if is_title_suffix(new_name, old_name):
+        return "filename matches title suffix (chapter prefix)"
+    if is_renumbered_match(new_name, old_name):
+        return "same filename, chapter renumbered"
     if na in nb or nb in na:
         return "name containment"
     if score >= 0.6:
@@ -176,29 +271,64 @@ def generate_review():
             "old_name": cs,
             "match_score": score,
             "match_reason": match_reason(nf["name"], cs, score),
-            "action": "REPLACE",
+            "action": "REPLACE" if score >= HIGH_CONFIDENCE else "KEEP",
         })
         matched_new.add(new_key)
         matched_old.add(cs)
 
-    # New files that didn't match anything
+    # New files that didn't match anything.
+    #
+    # Each row records its closest existing source even though the score was too
+    # low to pair. A re-recording under a new naming scheme scores near zero
+    # against its predecessor - "HI_gen_AI_VT26_Webinar_5.mp3" versus
+    # "Webinar_5_Driving_Change.mp3" shares almost no vocabulary - so no safe
+    # automatic rule can find it. Naming the nearest candidate puts the
+    # information where the decision is made, without acting on it.
     paired_keys = {(p["new_name"], p["new_path"]) for p in pairs}
     new_only = []
+    unmatched_old = [c for c in current_sources if c not in matched_old]
     for nf in new_files:
-        if (nf["name"], nf["path"]) not in paired_keys:
-            new_only.append({
-                "name": nf["name"],
-                "path": nf["path"],
-                "type": nf["type"],
-                "chapter": nf["chapter"],
-                "action": "ADD",
-            })
+        if (nf["name"], nf["path"]) in paired_keys:
+            continue
+        best_name, best_score = None, 0.0
+        for cs in unmatched_old:
+            score = compute_match_score(nf, cs)
+            if score > best_score:
+                best_name, best_score = cs, score
+        row = {
+            "name": nf["name"],
+            "path": nf["path"],
+            "type": nf["type"],
+            "chapter": nf["chapter"],
+            "action": "ADD",
+        }
+        if best_name and best_score >= CROSS_REF_FLOOR:
+            row["closest_existing"] = best_name
+            row["closest_score"] = best_score
+            row["_hint"] = (
+                "Too different to pair automatically. If this replaces "
+                f"{best_name!r}, set that row in current_only to DELETE."
+            )
+        new_only.append(row)
 
-    # Old sources not matched to any new file
+    # Old sources not matched to any new file, with the same cross-reference
+    # from the other direction.
+    unmatched_new = [nf for nf in new_files
+                     if (nf["name"], nf["path"]) not in paired_keys]
     current_only = []
     for cs in current_sources:
-        if cs not in matched_old:
-            current_only.append({"name": cs, "action": "KEEP"})
+        if cs in matched_old:
+            continue
+        best_name, best_score = None, 0.0
+        for nf in unmatched_new:
+            score = compute_match_score(nf, cs)
+            if score > best_score:
+                best_name, best_score = nf["name"], score
+        row = {"name": cs, "action": "KEEP"}
+        if best_name and best_score >= CROSS_REF_FLOOR:
+            row["closest_new_file"] = best_name
+            row["closest_score"] = best_score
+        current_only.append(row)
 
     pairs.sort(key=lambda p: -p["match_score"])
     current_only.sort(key=lambda c: c["name"].lower())
@@ -207,6 +337,9 @@ def generate_review():
         "_instructions": (
             "Review the matches below and set 'action' for each entry, then run:\n"
             "  python compare_sources.py --apply\n"
+            "\n"
+            f"PAIRS defaulting to KEEP scored below {HIGH_CONFIDENCE}: check them and change to\n"
+            "REPLACE if the match is right. A wrong REPLACE deletes a source permanently.\n"
             "\n"
             "PAIRS        -> REPLACE = delete old + upload new | DELETE = delete old only | KEEP = no change\n"
             "CURRENT_ONLY -> DELETE = remove from notebook | KEEP = leave as-is\n"
@@ -220,8 +353,10 @@ def generate_review():
     with open(REVIEW_PATH, "w", encoding="utf-8") as f:
         json.dump(review, f, indent=4, ensure_ascii=False)
 
+    high = sum(1 for p in pairs if p["match_score"] >= HIGH_CONFIDENCE)
     print(f"[OK] Comparison review saved to {REVIEW_PATH}")
-    print(f"     {len(pairs)} matched pair(s)  (default: REPLACE)")
+    print(f"     {len(pairs)} matched pair(s): {high} default REPLACE (score >= {HIGH_CONFIDENCE}),")
+    print(f"       {len(pairs) - high} default KEEP (lower confidence - review and promote)")
     print(f"     {len(new_only)} new-only source(s)  (default: ADD)")
     print(f"     {len(current_only)} existing-only source(s)  (default: KEEP)")
     print()
@@ -274,34 +409,89 @@ def apply_review():
     total_delete = replace_n + delete_pair + delete_only
     total_upload = replace_n + add_n
 
+    # Every file must exist before anything is deleted: a missing file discovered
+    # mid-run means the old source is already gone and its replacement never arrives.
+    missing = []
+    for row, action in zip(review.get("pairs", []), normalized["pairs"]):
+        if action == "REPLACE":
+            path = row.get("new_path", "")
+            if not path or not os.path.exists(path):
+                missing.append((row.get("new_name", "?"), path))
+    for row, action in zip(review.get("new_only", []), normalized["new_only"]):
+        if action == "ADD":
+            path = row.get("path", "")
+            if not path or not os.path.exists(path):
+                missing.append((row.get("name", "?"), path))
+
+    if missing:
+        print(f"[FAIL] {len(missing)} file(s) to upload are missing from disk:")
+        for name, path in missing[:10]:
+            print(f"  - {name}  ({path or 'no path'})")
+        if len(missing) > 10:
+            print(f"  ... and {len(missing) - 10} more")
+        print("[FAIL] Nothing deleted. Re-run organize_content.py, or set those rows")
+        print("       to KEEP/SKIP in comparison_review.json.")
+        sys.exit(1)
+
     print("--- Applying reviewed comparison plan ---")
     print(f"  Pairs:        {replace_n} REPLACE, {delete_pair} DELETE, {keep_pair} KEEP")
     print(f"  Current-only: {delete_only} DELETE, {keep_only} KEEP")
     print(f"  New-only:     {add_n} ADD, {skip_n} SKIP")
-    print(f"  -> {total_delete} source(s) to delete, {total_upload} file(s) to upload")
+    print(f"  -> {total_upload} file(s) to upload, then {total_delete} source(s) to delete")
     print()
 
+    # Upload before delete. A transient duplicate is recoverable by deleting it;
+    # a source deleted before its replacement arrives is not recoverable at all.
+    if total_upload > 0:
+        print("--- Running upload_agent.py ---")
+        result = subprocess.run([sys.executable, "upload_agent.py"], check=False)
+        if result.returncode != 0:
+            print(f"\n[FAIL] upload_agent.py exited with code {result.returncode}.")
+            print("[FAIL] Skipping all deletions: the sources marked for deletion are")
+            print("       still the only copies. Fix the uploads and re-run --apply;")
+            print("       rows that already uploaded can be set to SKIP first.")
+            sys.exit(1)
+    else:
+        print("--- No files to upload. ---")
+
     if total_delete > 0:
-        print("--- Running delete_agent.py ---")
+        print("\n--- Running delete_agent.py ---")
         result = subprocess.run([sys.executable, "delete_agent.py"], check=False)
         if result.returncode != 0:
             print(f"[WARN] delete_agent.py exited with code {result.returncode}")
+            print("\n--- Apply finished with errors. ---")
+            sys.exit(1)
     else:
         print("--- No sources to delete. ---")
-
-    if total_upload > 0:
-        print("\n--- Running upload_agent.py ---")
-        result = subprocess.run([sys.executable, "upload_agent.py"], check=False)
-        if result.returncode != 0:
-            print(f"[WARN] upload_agent.py exited with code {result.returncode}")
-    else:
-        print("--- No files to upload. ---")
 
     print("\n--- Apply complete. ---")
 
 
+def parse_args(argv=None):
+    """Parse the flags. Unknown ones are an error, deliberately.
+
+    This used to be `"--apply" in sys.argv`, so `--aply` fell through to
+    generate_review() and overwrote comparison_review.json - the one file a
+    human edits by hand - without a word.
+    """
+    parser = argparse.ArgumentParser(
+        description="Compare course content with the notebook's current sources.",
+        epilog="With no arguments, writes comparison_review.json for you to review. "
+               "With --apply, executes the reviewed plan.")
+    parser.add_argument("--apply", action="store_true",
+                        help="execute the reviewed plan: upload, then delete")
+    return parser.parse_args(argv)
+
+
 if __name__ == "__main__":
-    if "--apply" in sys.argv:
+    args = parse_args()
+    if args.apply:
         apply_review()
     else:
+        # This file is hand-edited, and regenerating it discards those edits.
+        if os.path.exists(REVIEW_PATH):
+            stamp = datetime.datetime.fromtimestamp(
+                os.path.getmtime(REVIEW_PATH)).strftime("%Y-%m-%d %H:%M")
+            print(f"[WARN] Replacing {REVIEW_PATH}, last written {stamp}.")
+            print("       Any actions edited by hand in it are discarded.")
         generate_review()

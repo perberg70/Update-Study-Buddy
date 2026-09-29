@@ -1,0 +1,22 @@
+# Browser automation for the NotebookLM agents (export / delete / upload).
+playwright>=1.40
+
+# PDF generation for tools/build_module_pdf.py. Ships a Unicode TrueType font
+# (Vera), so module PDFs render em-dashes and Swedish characters even where no
+# system font is available.
+reportlab>=4.0
+
+# Captions for the course's YouTube-hosted videos (tools/fetch_youtube_transcripts.py).
+# Optional: everything else works without it.
+youtube-transcript-api>=1.0
+
+# Local speech-to-text for the short videos (tools/transcribe_videos.py). Optional,
+# and local: audio never leaves the machine, which AGENTS.md requires. Several
+# times quicker on CPU than openai-whisper, which works too if preferred.
+faster-whisper>=1.0
+
+# Text out of the PDFs the course carries in static/, for the module PDFs
+# (tools/asset_text.py). Optional and pure Python: without it those documents
+# are labelled in the module PDF with a line saying the reader is missing.
+# pdfminer.six is used instead if it is the one already installed.
+pypdf>=4.0

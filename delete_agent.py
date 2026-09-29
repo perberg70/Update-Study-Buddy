@@ -4,13 +4,20 @@ Remove sources from NotebookLM.
 Modes:
 - Default: remove sources from comparison_review.json (REPLACE / DELETE actions).
 - --dedupe-current: remove duplicate copies from current_sources.json, keeping one copy per source.
+
+Usage:
+    python delete_agent.py --dry-run
+    python delete_agent.py
+    python delete_agent.py --dedupe-current --dry-run
 """
+import argparse
 import json
 import os
 import re
 import sys
 
-from config import CDP_URL, CURRENT_SOURCES_FILE, PROJECT_URL, REVIEW_PATH, normalize_action
+from config import CURRENT_SOURCES_FILE, PROJECT_URL, REVIEW_PATH, normalize_action
+from notebooklm_client import BrowserConnectionError, connect, describe_page
 
 
 
@@ -32,6 +39,12 @@ def _canonical_name(name: str) -> str:
     return re.sub(r"\s+", " ", name).strip().lower()
 
 
+# Upper bound on delete attempts per exact-match name. Not a count of copies:
+# the count cannot see offscreen rows, so the loop stops when the scrolling
+# search reports no match. This only stops a pathological loop.
+DELETE_SCAN_LIMIT = 25
+
+
 def get_sources_to_remove():
     """Collect source names to delete from comparison_review.json (deduplicated)."""
     if not os.path.exists(REVIEW_PATH):
@@ -46,6 +59,13 @@ def get_sources_to_remove():
     delete_pairs = 0
     delete_current_only = 0
 
+    # A REPLACE whose new file carries the same title as the source it replaces
+    # is the dangerous case. compare_sources.apply_review uploads before
+    # deleting, so by the time this runs the panel holds two rows with that
+    # title - the stale one and its replacement - and deleting "every match"
+    # removes both. Cap those at observed-1 so exactly one always survives.
+    same_title = []
+
     for pair in review.get("pairs", []):
         action = normalize_action(pair.get("action", ""))
         old_name = _get_name(pair)
@@ -54,6 +74,10 @@ def get_sources_to_remove():
             if old_name and old_name not in seen:
                 seen.add(old_name)
                 names.append(old_name)
+                if (action == "REPLACE"
+                        and _canonical_name(pair.get("new_name", ""))
+                        == _canonical_name(old_name)):
+                    same_title.append(old_name)
 
     for item in review.get("current_only", []):
         action = normalize_action(item.get("action", ""))
@@ -67,7 +91,22 @@ def get_sources_to_remove():
     print(
         f"[PLAN] Review delete actions: pairs={delete_pairs}, current_only={delete_current_only}, unique_sources={len(names)}"
     )
-    return [{"name": n, "max_deletions": None} for n in names]
+
+    if same_title:
+        print(f"[PLAN] {len(same_title)} REPLACE pair(s) upload under the same title as")
+        print("       the source they replace, so one copy is kept rather than")
+        print("       deleting every match:")
+        for name in same_title[:5]:
+            print(f"         {name[:64]}")
+        if len(same_title) > 5:
+            print(f"         ... and {len(same_title) - 5} more")
+        print("       Which copy survives cannot be told apart by title - re-run the")
+        print("       update if the notebook still shows the old content.")
+
+    protected = set(same_title)
+    return [{"name": n, "keep_one_copy": True} if n in protected
+            else {"name": n, "max_deletions": None}
+            for n in names]
 
 
 def get_duplicate_sources_to_remove():
@@ -104,43 +143,60 @@ def get_duplicate_sources_to_remove():
     return plan
 
 
-def count_source_occurrences(page, source_name):
-    """Count how many rows in the current UI match *source_name*."""
-    try:
-        return int(page.evaluate("""(name) => {
-            const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9åäö]+/g, ' ').replace(/\\s+/g, ' ').trim();
-            const hasTokenOverlap = (a, b) => {
-                const ta = new Set(norm(a).split(' ').filter(x => x.length > 2));
-                const tb = new Set(norm(b).split(' ').filter(x => x.length > 2));
-                if (!ta.size || !tb.size) return false;
-                let overlap = 0;
-                for (const t of ta) if (tb.has(t)) overlap += 1;
-                return overlap >= Math.min(2, Math.max(1, Math.floor(tb.size / 2)));
-            };
+# Shared JS helpers. Exact normalized equality is the default; the token/containment
+# matcher is opt-in via --fuzzy because it conflates distinct sources. Measured on a
+# real 144-source notebook, the fuzzy rule made 78% of titles match some *other*
+# source: chapter-prefixed filenames ("1 Welcome & What GenAI Can Do Today - X.mp3")
+# share enough words that every file in a chapter matches every other file in it.
+MATCH_JS_HELPERS = """
+    const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9åäö]+/g, ' ').replace(/\\s+/g, ' ').trim();
+    const hasTokenOverlap = (a, b) => {
+        const ta = new Set(norm(a).split(' ').filter(x => x.length > 2));
+        const tb = new Set(norm(b).split(' ').filter(x => x.length > 2));
+        if (!ta.size || !tb.size) return false;
+        let overlap = 0;
+        for (const t of ta) if (tb.has(t)) overlap += 1;
+        return overlap >= Math.min(2, Math.max(1, Math.floor(tb.size / 2)));
+    };
+    const makeMatcher = (target, fuzzy) => (candidate) => {
+        const nc = norm(candidate);
+        if (!nc || !target) return false;
+        if (nc === target) return true;
+        if (!fuzzy) return false;
+        return nc.includes(target) || target.includes(nc) || hasTokenOverlap(nc, target);
+    };
+    // Real source rows only - never bare <div>, which matches most of the page.
+    const ROW_SELECTOR = 'div.single-source-container, [role="listitem"], mat-list-item, .mat-mdc-list-item, .source-item';
+    const rowTitle = (row) => {
+        const btn = row.querySelector('button[aria-description]');
+        if (btn) return btn.getAttribute('aria-description') || '';
+        const col = row.querySelector('.source-title-column');
+        if (col) return col.innerText || col.textContent || '';
+        return row.innerText || row.textContent || '';
+    };
+"""
 
-            const target = norm(name);
+
+def count_source_occurrences(page, source_name, fuzzy: bool = False):
+    """Count how many source rows match *source_name*."""
+    try:
+        return int(page.evaluate("""(args) => {
+            """ + MATCH_JS_HELPERS + """
+            const target = norm(args.name);
             if (!target) return 0;
+            const isMatch = makeMatcher(target, args.fuzzy);
 
             let matches = 0;
-            const btns = document.querySelectorAll('button[aria-description]');
-            btns.forEach(btn => {
-                const desc = norm(btn.getAttribute('aria-description') || '');
-                if (desc && (desc === target || desc.includes(target) || target.includes(desc) || hasTokenOverlap(desc, target))) {
-                    matches += 1;
-                }
+            document.querySelectorAll('button[aria-description]').forEach(btn => {
+                if (isMatch(btn.getAttribute('aria-description') || '')) matches += 1;
             });
             if (matches > 0) return matches;
 
-            const rows = document.querySelectorAll('mat-list-item, [role="listitem"], .source-item, .mat-mdc-list-item, li');
-            rows.forEach(row => {
-                const text = norm(row.innerText || row.textContent || '');
-                if (!text) return;
-                if (text.includes(target) || target.includes(text) || hasTokenOverlap(text, target)) {
-                    matches += 1;
-                }
+            document.querySelectorAll(ROW_SELECTOR).forEach(row => {
+                if (isMatch(rowTitle(row))) matches += 1;
             });
             return matches;
-        }""", source_name))
+        }""", {"name": source_name, "fuzzy": bool(fuzzy)}))
     except Exception:
         return 0
 
@@ -160,45 +216,34 @@ def dismiss_overlays(page):
     page.wait_for_timeout(200)
 
 
-def find_more_button_js(page, source_name):
-    """Find source row 'More' button using robust JS matching.
+def find_more_button_js(page, source_name, fuzzy: bool = False):
+    """Find the button for *source_name*'s row and mark it for clicking.
 
-    Handles truncation/annotation differences by normalizing and token matching.
+    Exact normalized match by default. Pass fuzzy=True (--fuzzy) to restore the
+    old token/containment behaviour - see MATCH_JS_HELPERS for why that is unsafe.
     """
-    found = page.evaluate("""(name) => {
-        const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9åäö]+/g, ' ').replace(/\s+/g, ' ').trim();
-        const hasTokenOverlap = (a, b) => {
-            const ta = new Set(norm(a).split(' ').filter(x => x.length > 2));
-            const tb = new Set(norm(b).split(' ').filter(x => x.length > 2));
-            if (!ta.size || !tb.size) return false;
-            let overlap = 0;
-            for (const t of ta) if (tb.has(t)) overlap += 1;
-            return overlap >= Math.min(2, Math.max(1, Math.floor(tb.size / 2)));
-        };
+    found = page.evaluate("""(args) => {
+        """ + MATCH_JS_HELPERS + """
+        const target = norm(args.name);
+        if (!target) return false;
+        const isMatch = makeMatcher(target, args.fuzzy);
 
-        const target = norm(name);
         document.querySelectorAll('[data-delete-target]').forEach(
             el => el.removeAttribute('data-delete-target')
         );
 
-        // Strategy 1: aria-description on the 3-dots button
-        const btns = document.querySelectorAll('button[aria-description]');
-        for (const btn of btns) {
-            const desc = btn.getAttribute('aria-description') || '';
-            const nd = norm(desc);
-            if (nd === target || nd.includes(target) || target.includes(nd) || hasTokenOverlap(nd, target)) {
+        // Strategy 1: aria-description carries the full untruncated source title.
+        for (const btn of document.querySelectorAll('button[aria-description]')) {
+            if (isMatch(btn.getAttribute('aria-description') || '')) {
                 btn.setAttribute('data-delete-target', 'true');
                 btn.scrollIntoView({block: 'center', behavior: 'instant'});
                 return true;
             }
         }
 
-        // Strategy 2: row text + local button fallback
-        const rows = document.querySelectorAll('mat-list-item, [role="listitem"], .source-item, .mat-mdc-list-item, li, div');
-        for (const row of rows) {
-            const text = norm(row.innerText || row.textContent || '');
-            if (!text) continue;
-            if (text.includes(target) || target.includes(text) || hasTokenOverlap(text, target)) {
+        // Strategy 2: match the row's title, then take a button within that row.
+        for (const row of document.querySelectorAll(ROW_SELECTOR)) {
+            if (isMatch(rowTitle(row))) {
                 const rowBtn = row.querySelector('button[aria-description], button[aria-label*="More" i], button[aria-label*="Mer" i], button');
                 if (rowBtn) {
                     rowBtn.setAttribute('data-delete-target', 'true');
@@ -209,7 +254,7 @@ def find_more_button_js(page, source_name):
         }
 
         return false;
-    }""", source_name)
+    }""", {"name": source_name, "fuzzy": bool(fuzzy)})
 
     if found:
         return page.locator('button[data-delete-target="true"]').first
@@ -229,11 +274,11 @@ def find_sources_panel(page):
         return None
 
 
-def find_more_button_with_scroll(page, source_name, attempts=10):
+def find_more_button_with_scroll(page, source_name, attempts=10, fuzzy: bool = False):
     """Try to locate a source's more button while scrolling a virtualized list."""
     panel = find_sources_panel(page)
 
-    btn = find_more_button_js(page, source_name)
+    btn = find_more_button_js(page, source_name, fuzzy=fuzzy)
     if btn:
         return btn
 
@@ -241,7 +286,7 @@ def find_more_button_with_scroll(page, source_name, attempts=10):
         return None
 
     for _ in range(attempts):
-        btn = find_more_button_js(page, source_name)
+        btn = find_more_button_js(page, source_name, fuzzy=fuzzy)
         if btn:
             return btn
         try:
@@ -257,7 +302,7 @@ def find_more_button_with_scroll(page, source_name, attempts=10):
         pass
 
     for _ in range(max(3, attempts // 2)):
-        btn = find_more_button_js(page, source_name)
+        btn = find_more_button_js(page, source_name, fuzzy=fuzzy)
         if btn:
             return btn
         try:
@@ -309,11 +354,16 @@ def click_confirm_delete(page):
     return False
 
 
-def delete_one_source(page, source_name):
+def delete_one_source(page, source_name, fuzzy: bool = False):
     """Delete a single copy of *source_name* from the notebook. Returns True on success."""
     dismiss_overlays(page)
 
-    more_btn = find_more_button_with_scroll(page, source_name)
+    more_btn = find_more_button_with_scroll(page, source_name, fuzzy=fuzzy)
+
+    if not more_btn and not fuzzy:
+        # No substring text search in exact mode: get_by_text(exact=False) would
+        # reintroduce the loose matching this mode exists to avoid.
+        return False
 
     if not more_btn:
         queries = [source_name]
@@ -376,12 +426,13 @@ def delete_one_source(page, source_name):
     return True
 
 
-def _execute_deletion_plan(plan, dry_run: bool = False):
+def _execute_deletion_plan(plan, dry_run: bool = False, fuzzy: bool = False):
     if not plan:
         print("--- No sources to remove. ---")
         return
 
     print(f"--- Removing {len(plan)} source name(s) from NotebookLM ---")
+    print(f"    matching mode: {'FUZZY (unsafe)' if fuzzy else 'exact'}")
 
     if dry_run:
         print("[DRY-RUN] Parsed delete plan only. No browser actions executed.")
@@ -407,13 +458,10 @@ def _execute_deletion_plan(plan, dry_run: bool = False):
     with sync_playwright() as p:
         try:
             print("--- Attempting to connect via CDP (Port 9222) ---")
-            browser = p.chromium.connect_over_cdp(CDP_URL)
-            context = browser.contexts[0]
-            page = context.pages[0]
-            print("[OK] Connected to existing browser via CDP.")
-        except Exception as e:
-            print(f"[FAIL] CDP connection failed: {e}")
-            print("Start Chrome with: chrome.exe --remote-debugging-port=9222")
+            browser, page = connect(p)
+            print(f"[OK] Connected via CDP. Driving tab: {describe_page(page)}")
+        except BrowserConnectionError as e:
+            print(f"[FAIL] {e}")
             sys.exit(1)
 
         page.goto(PROJECT_URL, wait_until="domcontentloaded")
@@ -430,15 +478,34 @@ def _execute_deletion_plan(plan, dry_run: bool = False):
             keep_one_copy = bool(item.get("keep_one_copy"))
 
             if keep_one_copy:
-                observed = count_source_occurrences(page, source_name)
+                observed = count_source_occurrences(page, source_name, fuzzy=fuzzy)
                 max_deletions = max(observed - 1, 0)
                 if observed > 0:
                     print(f"   [INFO] {source_name}: observed {observed} copy/copies, deleting {max_deletions}.")
 
+            if max_deletions is None:
+                observed = count_source_occurrences(page, source_name, fuzzy=fuzzy)
+                if fuzzy:
+                    # Fuzzy can match unrelated rows, so never exceed what was
+                    # actually seen: an over-broad name must not cascade.
+                    max_deletions = observed
+                else:
+                    # count_source_occurrences reads the rendered DOM only, and
+                    # returns 0 on any error. The panel is virtualized - that is
+                    # why find_more_button_with_scroll exists - so a row merely
+                    # scrolled out of view counts 0, and capping the loop there
+                    # would skip a deletion that delete_one_source would have
+                    # found. Exact matching cannot cascade, so let its scrolling
+                    # search decide when to stop; the cap is only a runaway guard.
+                    max_deletions = max(observed, DELETE_SCAN_LIMIT)
+                    if not observed:
+                        print(f"   [INFO] {source_name}: not in the rendered panel; "
+                              "searching by scrolling.")
+
             copies = 0
-            while copies < (max_deletions if max_deletions is not None else 10):
+            while copies < max_deletions:
                 try:
-                    if delete_one_source(page, source_name):
+                    if delete_one_source(page, source_name, fuzzy=fuzzy):
                         copies += 1
                     else:
                         break
@@ -446,6 +513,9 @@ def _execute_deletion_plan(plan, dry_run: bool = False):
                     dismiss_overlays(page)
                     break
 
+            if copies == 0:
+                print(f"   [WARN] {source_name}: nothing deleted - not found in the "
+                      "panel.")
             total_removed += copies
             if copies > 0:
                 extra = f" ({copies} copies)" if copies > 1 else ""
@@ -456,21 +526,89 @@ def _execute_deletion_plan(plan, dry_run: bool = False):
         print(f"\n--- Removed {total_removed} source(s) total. ---")
 
 
-def run_delete(dry_run: bool = False):
+def run_delete(dry_run: bool = False, fuzzy: bool = False):
     plan = get_sources_to_remove()
-    _execute_deletion_plan(plan, dry_run=dry_run)
+    _execute_deletion_plan(plan, dry_run=dry_run, fuzzy=fuzzy)
+    return 0
 
 
-def run_dedupe_current_sources(dry_run: bool = False):
+DEDUPE_RETIRED_NOTICE = """
+[STOP] Refusing to deduplicate by title.
+
+  A source title does not identify a source. Titles for web sources come from
+  the target page's <title>, and many pages share one. In this notebook, seven
+  separate sources are all titled "Microsoft Forms" - seven different forms,
+  not seven copies. Deleting "duplicates" by title would destroy six of them.
+
+  The information needed to tell copies from distinct sources is the content,
+  which this script cannot see.
+
+  Resolve duplicates in the notebook UI, where you can open each source.
+  To see which titles repeat:
+
+      python delete_agent.py --dedupe-current --dry-run
+
+  If you have already checked the content and know these are true copies:
+
+      python delete_agent.py --dedupe-current --confirm-unsafe-dedupe
+"""
+
+
+def run_dedupe_current_sources(dry_run: bool = False, fuzzy: bool = False,
+                               confirmed: bool = False):
     plan = get_duplicate_sources_to_remove()
-    _execute_deletion_plan(plan, dry_run=dry_run)
+
+    # Listing repeated titles is useful; acting on that list is not.
+    if not dry_run and not confirmed:
+        _execute_deletion_plan(plan, dry_run=True, fuzzy=fuzzy)
+        print(DEDUPE_RETIRED_NOTICE)
+        return 1
+
+    _execute_deletion_plan(plan, dry_run=dry_run, fuzzy=fuzzy)
+    return 0
+
+
+def parse_args(argv=None):
+    """Parse the flags. Unknown ones are an error, deliberately.
+
+    This used to be `"--dry-run" in sys.argv`, which meant `--dryrun` silently
+    disarmed the safety and deleted for real. A misspelled flag that engages a
+    safety is harmless; one that disables a safety is not, and NotebookLM
+    deletion cannot be undone. argparse rejects anything it does not recognise
+    before a browser is opened or a plan is read.
+    """
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--dry-run", action="store_true",
+                        help="print the plan and delete nothing")
+    parser.add_argument("--dedupe-current", action="store_true",
+                        help="operate on repeated titles in current_sources.json "
+                             "instead of the review file (refuses without "
+                             "--confirm-unsafe-dedupe)")
+    parser.add_argument("--fuzzy", action="store_true",
+                        help="match on shared words instead of exact titles. Unsafe")
+    parser.add_argument("--confirm-unsafe-dedupe", action="store_true",
+                        help="having checked the content yourself, allow "
+                             "--dedupe-current to delete")
+    return parser.parse_args(argv)
 
 
 if __name__ == "__main__":
-    dry_run = "--dry-run" in sys.argv
-    dedupe_current = "--dedupe-current" in sys.argv
+    args = parse_args()
 
-    if dedupe_current:
-        run_dedupe_current_sources(dry_run=dry_run)
+    # The mode a typo used to flip silently is now the first thing printed.
+    print("[MODE] dry run - nothing will be deleted" if args.dry_run
+          else "[MODE] LIVE - sources will be deleted from the notebook")
+
+    if args.fuzzy:
+        print("[WARN] --fuzzy matches on shared words, so distinct sources can be")
+        print("       treated as copies of each other. Run with --dry-run first.")
+
+    if args.dedupe_current:
+        code = run_dedupe_current_sources(
+            dry_run=args.dry_run, fuzzy=args.fuzzy,
+            confirmed=args.confirm_unsafe_dedupe,
+        )
     else:
-        run_delete(dry_run=dry_run)
+        code = run_delete(dry_run=args.dry_run, fuzzy=args.fuzzy)
+    raise SystemExit(code)
