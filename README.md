@@ -17,6 +17,7 @@ python start_run.py
 It finds the export, confirms it really is a course archive, records which one it read,
 lists the modules, and prints the commands to run next. Run it at the start of every
 update.
+
 ```powershell
 pip install -r requirements.txt   # first time
 python preflight.py               # checks Python, ffmpeg, packages, branch, export
@@ -239,9 +240,9 @@ Update Study Buddy/
 - **Account:** Use the Chrome window started with `--remote-debugging-port=9222` and log in with the Google account that has editor access to the notebook.
 ### Deduplication is retired
 
-
 - `--dedupe-current --dry-run` still lists repeated titles, which is genuinely useful.
-- `--dedupe-current` prints that list, explains the above, and exits non-zero.
+- `--dedupe-current` prints that list, says why a repeated title is not proof of a
+  duplicate, and exits non-zero.
 - `--dedupe-current --confirm-unsafe-dedupe` proceeds, for someone who has checked the
   content themselves.
 
@@ -269,6 +270,8 @@ as ignored, never silently passed over.
 uploads it **to** edX, to update the course home page. This project **reads** a Studio
 *export* pulled **from** edX. Opposite directions, different trees, and nothing here
 calls anything there.
+
+### Which archive did this come from?
 
 To see what you have:
 
@@ -354,7 +357,7 @@ Three sources, cheapest first. All of them write `<video url_name>.txt` into
 | Teams recordings | export the VTT, drop it in `transcripts\` | manual, best quality for webinars |
 | Everything else (short clips) | `python tools\transcribe_videos.py --module 1` | local CPU time |
 
-`transcribe_videos.py` runs **entirely on your machine** — It needs one of:
+`transcribe_videos.py` runs **entirely on your machine** — it needs one of:
 
 ```powershell
 pip install faster-whisper     # recommended: several times quicker on CPU
