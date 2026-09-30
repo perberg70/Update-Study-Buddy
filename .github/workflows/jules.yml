@@ -1,0 +1,42 @@
+name: Jules Agent Task
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  run-jules:
+    # Only run when the specific trigger label is added
+    if: github.event.label.name == 'jules'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify AGENTS.md exists
+        run: |
+          if [ ! -f AGENTS.md ]; then
+            echo "Error: AGENTS.md not found in repository root."
+            exit 1
+          fi
+
+      - name: Execute Jules Action
+        uses: google-labs-code/jules-action@v1
+        with:
+          api-key: ${{ secrets.JULES_API_KEY }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          # Path to your repository instructions file
+          instruction-file: 'AGENTS.md'
+          # The specific objective passed from the issue body
+          prompt: |
+            Task Title: ${{ github.event.issue.title }}
+            Task Details:
+            ${{ github.event.issue.body }}
+          base-branch: 'main'
+          auto-pr: true
