@@ -14,11 +14,14 @@ Usage:
 
 import argparse
 import json
+import logging
 import sys
 import xml.etree.ElementTree as ET
 
 from config import COURSE_STRUCTURE_PATH, resolve_tar_path
 from olx_archive import CourseArchive, CourseArchiveError
+
+logger = logging.getLogger(__name__)
 
 # An export carries what the course holds, not what a student sees. A unit
 # marked staff-only, or one whose release date has not passed, is in the
@@ -40,11 +43,14 @@ def _parse(archive, relpath):
     """Root element of an OLX file, or None when absent or malformed."""
     text = archive.read_text(relpath)
     if text is None:
+        logger.debug(f"OLX file missing: {relpath}")
         return None
     try:
         return ET.fromstring(text)
     except ET.ParseError as exc:
-        print(f"[WARN] {relpath} is not valid XML: {exc}")
+        msg = f"{relpath} is not valid XML: {exc}"
+        logger.warning(msg)
+        print(f"[WARN] {msg}")
         return None
 
 
@@ -52,21 +58,31 @@ def parse_course(archive):
     """Chapter -> sequential -> vertical -> component tree."""
     root = _parse(archive, "course.xml")
     if root is None:
+        logger.error("course.xml is missing, unreadable, or malformed in archive")
         raise CourseArchiveError("course.xml is missing or unreadable")
 
     course_url_name = root.get("url_name")
+    if not course_url_name:
+        logger.error("course.xml is missing required 'url_name' attribute")
+        raise CourseArchiveError("course.xml is missing required 'url_name' attribute")
+
     course_root = _parse(archive, f"course/{course_url_name}.xml")
     if course_root is None:
+        logger.error(f"course/{course_url_name}.xml missing or unreadable in archive")
         raise CourseArchiveError(
             f"course/{course_url_name}.xml not found in the archive")
 
     chapters = []
     for chapter in course_root.findall("chapter"):
         ch_url_name = chapter.get("url_name")
+        if not ch_url_name:
+            logger.warning("Chapter element in course XML is missing 'url_name' attribute")
+            continue
         chapter_obj = {"title": ch_url_name, "sequentials": []}
 
         ch_root = _parse(archive, f"chapter/{ch_url_name}.xml")
         if ch_root is None:
+            logger.warning(f"Chapter file chapter/{ch_url_name}.xml is missing or malformed")
             chapters.append(chapter_obj)
             continue
         chapter_obj["title"] = ch_root.get("display_name", ch_url_name)
@@ -76,10 +92,18 @@ def parse_course(archive):
 
         for seq in ch_root.findall("sequential"):
             seq_url_name = seq.get("url_name")
+            if not seq_url_name:
+                logger.warning(
+                    f"Sequential element in chapter/{ch_url_name}.xml is missing 'url_name' attribute"
+                )
+                continue
             seq_obj = {"title": seq_url_name, "verticals": []}
 
             seq_root = _parse(archive, f"sequential/{seq_url_name}.xml")
             if seq_root is None:
+                logger.warning(
+                    f"Sequential file sequential/{seq_url_name}.xml is missing or malformed"
+                )
                 chapter_obj["sequentials"].append(seq_obj)
                 continue
             seq_obj["title"] = seq_root.get("display_name", seq_url_name)
@@ -89,6 +113,11 @@ def parse_course(archive):
 
             for vert in seq_root.findall("vertical"):
                 vert_url_name = vert.get("url_name")
+                if not vert_url_name:
+                    logger.warning(
+                        f"Vertical element in sequential/{seq_url_name}.xml is missing 'url_name' attribute"
+                    )
+                    continue
                 vert_obj = {"title": vert_url_name, "components": []}
 
                 vert_root = _parse(archive, f"vertical/{vert_url_name}.xml")
@@ -100,7 +129,12 @@ def parse_course(archive):
                     vert_obj["components"] = [
                         {"type": component.tag, "url_name": component.get("url_name")}
                         for component in vert_root
+                        if component.get("url_name")
                     ]
+                else:
+                    logger.warning(
+                        f"Vertical file vertical/{vert_url_name}.xml is missing or malformed"
+                    )
                 seq_obj["verticals"].append(vert_obj)
 
             chapter_obj["sequentials"].append(seq_obj)
