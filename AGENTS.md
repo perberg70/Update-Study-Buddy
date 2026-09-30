@@ -1,58 +1,47 @@
 # AGENTS.md
 
 ## 1. Project Context & Stack
-- **Repository:** Payment & Checkout Microservice
-- **Runtime:** Node.js 22 LTS
-- **Package Manager:** `pnpm` (version 9.x) - do NOT use `npm` or `yarn`.
-- **Frameworks:** Fastify, TypeScript 5.5, Prisma ORM, Vitest.
+- **Repository:** Update-Study-Buddy
+- **Purpose:** Synchronize edX course exports with Google NotebookLM.
+- **Language / Runtime:** Python 3.10+
+- **Dependency Management:** `pip` with `requirements.txt` (or `pyproject.toml` if present).
 
 ---
 
 ## 2. Environment & Commands
-Agents should run all commands from the repository root.
+Execute commands from the repository root:
 
-- **Dependency Installation:** `pnpm install --frozen-lockfile`
-- **Build / Typecheck:** `pnpm build` (Runs `tsc --noEmit`)
-- **Lint & Format:** `pnpm lint` && `pnpm format:check`
-- **Auto-Fix Format:** `pnpm format`
-- **Local Dev Server:** `pnpm dev`
+- **Install Dependencies:** `pip install -r requirements.txt`
+- **Run the Application:** `python -m src.main` (or the primary entry point script)
+- **Code Style & Linting:** `flake8` or `black --check .` (if installed)
 
 ---
 
 ## 3. Testing Workflows
-Always execute relevant tests before submitting or declaring a task complete.
+Always run the test suite before finalizing any changes:
 
-- **Run all unit tests:** `pnpm test:unit`
-- **Run a single test file:** `pnpm vitest run src/modules/billing/invoice.test.ts`
-- **Run with coverage:** `pnpm test:coverage`
-- **E2E / Integration tests:** `pnpm test:e2e` (Requires local Docker dependencies via `docker compose up -d`)
+- **Run Full Test Suite:** `python tests/run_all.py`
+- **Run Pytest (if used):** `pytest`
 
 ---
 
 ## 4. Directory Structure
 ```text
-src/
-├── api/          # Route handlers and input schema validation (Zod)
-├── core/         # Business logic and domain entities (framework-agnostic)
-├── db/           # Prisma client, migrations, and seed scripts
-└── utils/        # Shared helper functions and custom error classes
 tests/
-├── fixtures/     # Mock data and test helpers
-└── integration/  # API-level end-to-end test suites
+└── run_all.py       # Test suite runner
+src/                 # Main application source code (edX sync and NotebookLM integration)
 ```
 
 ---
 
 ## 5. Architectural Rules & Patterns
-- **Typing:** Strict TypeScript only. Avoid `any` under all circumstances. Use `unknown` with type guards if types are unpredictable.
-- **Validation:** All incoming request bodies must be validated with Zod schemas in `src/api/schemas/`.
-- **Error Handling:** Throw domain-specific errors extending `AppError` from `src/utils/errors.ts`. Never let raw database errors bubble to the HTTP client.
-- **Async/Await:** Prefer `async/await` syntax over raw Promise chaining (`.then()`).
+- **Typing:** Use Python type hints (`typing` module / built-in types) for all new functions and class methods.
+- **Error Handling:** Gracefully handle network timeouts and API errors when communicating with edX and NotebookLM endpoints.
+- **Environment Variables:** Never hardcode credentials, API tokens, or session cookies into source files; load them via environment variables or `.env`.
 
 ---
 
 ## 6. Agent Guardrails & Constraints
-- **Database Migrations:** Do NOT create or run Prisma migrations (`pnpm prisma migrate dev`) unless the prompt explicitly requests a schema change.
-- **Dependencies:** Do NOT add new third-party packages without explicit instructions.
-- **Protected Files:** Do not modify `.github/workflows/`, `docker-compose.yml`, or production environment templates (`.env.production`).
-- **Git Protocol:** Keep commits atomic with conventional commit format (e.g., `fix(billing): handle null card tokens`).
+- **Scope:** Only modify files directly related to the issue objective.
+- **Protected Files:** Do not modify `.github/workflows/` or environment templates unless explicitly instructed.
+- **Verification:** Every change must pass `python tests/run_all.py` before opening a pull request.
