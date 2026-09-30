@@ -67,6 +67,11 @@ def main():
         check(failures, "not-a-real-flag" in (result.stderr + result.stdout),
               f"{script} did not name the bad flag")
 
+    # upload_agent.py's supervised-run and wait options are documented.
+    shown = run("upload_agent.py", "--help").stdout
+    for flag in ("--only", "--wait-minutes"):
+        check(failures, flag in shown, f"upload_agent.py --help does not list {flag}")
+
     # The flags whose misspelling used to disarm a safety.
     for script, typo in DISARMING_TYPOS:
         result = run(script, typo)

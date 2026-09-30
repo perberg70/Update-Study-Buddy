@@ -9,6 +9,7 @@ current_sources.json
 course_structure.json
 processing_manifest.json
 comparison_review.json
+upload_results.json
 
 # Transcripts: course content, whether exported from Teams or produced locally.
 transcripts/
@@ -17,6 +18,7 @@ transcripts/
 export_sources_debug.json
 export_sources_debug.txt
 panel_dump.json
+upload_verify_debug.json
 tar_contents.txt
 
 # Media produced by organize_content.py.

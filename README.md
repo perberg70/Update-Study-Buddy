@@ -81,7 +81,7 @@ Save the file and press Enter in the terminal to continue.
 | Step | Script | What it does |
 |------|--------|--------------|
 | **4** | `delete_agent.py` | Reads `comparison_review.json`. Deletes **all copies** of each source marked REPLACE or DELETE from the notebook. |
-| **5** | `upload_agent.py` | Reads `comparison_review.json`. Uploads only files marked REPLACE or ADD. Falls back to full manifest if no review file exists. |
+| **5** | `upload_agent.py` | Reads `comparison_review.json`. Uploads only files marked REPLACE or ADD, and **verifies each one arrived and finished processing**. Falls back to full manifest if no review file exists. |
 
 If any step fails (non-zero exit), the pipeline stops.
 
@@ -162,7 +162,9 @@ python run_full_update.py
 - `python compare_sources.py` — generate `comparison_review.json` for review.
 - `python compare_sources.py --apply` — apply the reviewed plan (upload, then delete).
 - `python organize_content.py` — build organized content and the manifest.
-- `python upload_agent.py` — upload per `comparison_review.json` (or the full manifest).
+- `python upload_agent.py` — upload per `comparison_review.json` (or the full manifest),
+  and verify each upload in the notebook. `--only "<text>"` uploads just the planned files
+  whose name contains that text — a supervised first run, one file at a time.
 - `python delete_agent.py --dry-run` — preview exactly which names are delete targets.
   Every run announces its mode first: `[MODE] dry run` or `[MODE] LIVE`.
 - `python delete_agent.py` — delete per `comparison_review.json`. **Exact titles only.**
@@ -478,6 +480,16 @@ an existing `comparison_review.json`, since that file holds your edits.
   containing a negation now fails validation and names the row instead of guessing.
 - **Uploads run before deletions**, and a failed upload cancels the deletions. A transient
   duplicate is recoverable; a source deleted before its replacement arrives is not.
+- **An upload counts only when the notebook shows it.** `upload_agent.py` used to wait a
+  fixed three seconds and call that success. Now each file must appear in the Sources
+  panel, and then all of them must finish processing (a finished row has its checkbox;
+  audio can take minutes — `--wait-minutes`, default 15). An error, a file that never
+  shows up, one still processing at the deadline, or one that disappears afterwards all
+  count as failures, so `--apply` deletes nothing. What the panel showed is written to
+  `upload_verify_debug.json`.
+- **Re-running is safe.** `upload_results.json` records what each file became in the
+  notebook. A re-run does not send again a file already verified, and one that arrived but
+  was still processing is waited on rather than re-sent; only real failures are retried.
 - **Files are verified to exist** before anything is deleted.
 - **The review pause prints the actual delete list** before asking you to press Enter.
 - **Notebook URL:** NotebookLM is now "Gemini Notebook" at `notebook.google.com`. `config.py` points there; `notebooklm.google.com` still redirects. Override with `NOTEBOOKLM_PROJECT_URL`.

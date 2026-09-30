@@ -447,9 +447,11 @@ def apply_review():
         result = subprocess.run([sys.executable, "upload_agent.py"], check=False)
         if result.returncode != 0:
             print(f"\n[FAIL] upload_agent.py exited with code {result.returncode}.")
-            print("[FAIL] Skipping all deletions: the sources marked for deletion are")
-            print("       still the only copies. Fix the uploads and re-run --apply;")
-            print("       rows that already uploaded can be set to SKIP first.")
+            print("[FAIL] Skipping all deletions: not every upload is verified in the")
+            print("       notebook, so the sources marked for deletion may still be the")
+            print("       only copies. Re-run --apply: uploads already verified are not")
+            print("       uploaded again, and ones still processing are checked, not")
+            print("       re-sent.")
             sys.exit(1)
     else:
         print("--- No files to upload. ---")
