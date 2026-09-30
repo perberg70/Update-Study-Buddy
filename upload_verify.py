@@ -149,12 +149,10 @@ def appeared(before, after, file_name):
     fresh = sorted(set(new_titles(before, after)))
     if not fresh:
         return None, ""
-    if len(fresh) == 1:
-        # Whatever it is called: a PDF can be titled from its own metadata
-        # ("Module 1: Welcome") rather than its filename.
-        return fresh[0], ""
     stem = canonical(os.path.splitext(file_name)[0])
     matches = [t for t in fresh if stem and stem in canonical(t)]
+    if len(fresh) == 1 and not matches:
+        return None, f"one row appeared, but its title ({fresh[0][:40]}) does not look like the filename"
     if len(matches) == 1:
         return matches[0], ""
     return None, (f"cannot tell which new source is this upload: {len(fresh)} appeared "
@@ -320,7 +318,7 @@ def prior_decision(results, key, panel, notebook):
     if not title:
         return "upload", None
     states = panel.states(title)
-    if entry.get("status") == VERIFIED and states:
+    if entry.get("status") == VERIFIED and states.count(READY) >= copies and ERROR not in states:
         return "skip", entry
     if entry.get("status") in (UNCONFIRMED, "appeared") \
             and len(states) >= copies and ERROR not in states:
