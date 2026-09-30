@@ -123,7 +123,9 @@ def run_upload(only=None, wait_minutes=DEFAULT_WAIT_MINUTES) -> int:
         return 0
 
     results = uv.load_results(UPLOAD_RESULTS_PATH)
-    verified, unconfirmed, failed = [], [], []
+    verified: list[str] = []
+    unconfirmed: list[tuple[str, str]] = []
+    failed: list[tuple[str, str]] = []
     arrived = []            # uploads whose row appeared; phase B waits on these
     debug = []
     earlier = 0
@@ -290,7 +292,7 @@ def run_upload(only=None, wait_minutes=DEFAULT_WAIT_MINUTES) -> int:
         if arrived:
             print(f"\n--- Waiting for {len(arrived)} upload(s) to finish processing "
                   f"(up to {wait_minutes:g} min) ---")
-            outcomes = {}
+            outcomes: dict[int, tuple[str, str]] = {}
             _, now = uv.poll(read, uv.settle_check(baseline, arrived, outcomes),
                              wait_minutes * 60, interval=POLL_INTERVAL)
             uv.unsettled(now, arrived, outcomes, wait_minutes)

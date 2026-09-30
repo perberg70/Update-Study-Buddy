@@ -143,7 +143,9 @@ def run_export() -> int:
 
     extracted = len(sources)
 
-    seen, unique, duplicates = set(), [], {}
+    seen: set[str] = set()
+    unique: list[str] = []
+    duplicates: dict[str, int] = {}
     for name in sources:
         key = name.lower()
         if key not in seen:
