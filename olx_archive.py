@@ -16,9 +16,12 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import logging
 import os
 import posixpath
 import tarfile
+
+logger = logging.getLogger(__name__)
 
 # OLX directories holding structure and content. Everything here is text and
 # small enough to hold in memory.
@@ -41,9 +44,22 @@ class CourseArchive:
     """
 
     def __init__(self, tar_path: str):
+        if not tar_path or not isinstance(tar_path, (str, bytes, os.PathLike)):
+            logger.error(f"Invalid course archive path type or value: {tar_path!r}")
+            raise CourseArchiveError(f"Invalid course archive path: {tar_path!r}")
+
         self.tar_path = os.path.abspath(tar_path)
         if not os.path.exists(self.tar_path):
+            logger.error(f"Course archive path does not exist: {self.tar_path}")
             raise CourseArchiveError(f"{tar_path} not found")
+
+        if not os.path.isfile(self.tar_path):
+            logger.error(f"Course archive path is not a file: {self.tar_path}")
+            raise CourseArchiveError(f"{tar_path} is not a file")
+
+        if not os.access(self.tar_path, os.R_OK):
+            logger.error(f"Course archive file is not readable: {self.tar_path}")
+            raise CourseArchiveError(f"{tar_path} is not readable")
 
         self._sizes: dict[str, int] = {}
         self._cache: dict[str, bytes] = {}
@@ -53,10 +69,12 @@ class CourseArchive:
         try:
             with tarfile.open(self.tar_path, "r:gz") as tar:
                 self._scan(tar)
-        except tarfile.TarError as exc:
+        except (tarfile.TarError, EOFError, OSError) as exc:
+            logger.error(f"Cannot read course archive {self.tar_path}: {exc}")
             raise CourseArchiveError(f"cannot read {tar_path}: {exc}") from exc
 
         if not self._sizes:
+            logger.error(f"Course archive contains no files: {self.tar_path}")
             raise CourseArchiveError(f"{tar_path} contains no files")
 
     # -- loading ---------------------------------------------------------
@@ -90,8 +108,10 @@ class CourseArchive:
         candidates = [n for n in raw if posixpath.basename(n) == "course.xml"]
         if not candidates:
             top = sorted({n.split("/", 1)[0] for n in raw})[:12]
+            top_str = ", ".join(top) if top else "none"
+            logger.error(f"no course.xml in archive. Top-level entries: {top_str}")
             raise CourseArchiveError(
-                "no course.xml in the archive. Top-level entries: " + ", ".join(top))
+                "no course.xml in the archive. Top-level entries: " + top_str)
         # Shallowest wins: course/course.xml inside the root is the OLX course
         # definition, not the archive root marker.
         candidates.sort(key=lambda n: n.count("/"))
@@ -130,7 +150,15 @@ class CourseArchive:
 
     def read_text(self, relpath: str, encoding="utf-8"):
         data = self.read_bytes(relpath)
-        return None if data is None else data.decode(encoding, "replace")
+        if data is None:
+            return None
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError as exc:
+            logger.warning(
+                f"Decoding {relpath} with {encoding} failed ({exc}); falling back to replacement chars"
+            )
+            return data.decode(encoding, "replace")
 
     def listdir(self, subdir: str):
         """Immediate file names under *subdir*."""
