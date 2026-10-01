@@ -267,7 +267,12 @@ def run_upload(only=None, wait_minutes=DEFAULT_WAIT_MINUTES) -> int:
             outcome, now = uv.poll(read, uv.arrival_check(before, file_name), timeout,
                                    interval=POLL_INTERVAL)
             if outcome is None:
-                reason = f"never appeared in the Sources panel within {timeout:.0f}s"
+                reason = (f"no source matching it appeared in the Sources panel within "
+                          f"{timeout:.0f}s")
+                others = uv.unrelated_arrivals(before, now, file_name)
+                if others:
+                    reason += (f"; new but not this file: "
+                               f"{'; '.join(t[:40] for t in others[:3])}")
             elif outcome[0] == uv.FAILED:
                 reason = outcome[2]
             else:
