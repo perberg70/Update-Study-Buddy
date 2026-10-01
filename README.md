@@ -208,7 +208,8 @@ Update Study Buddy/
 ├── notebooklm_client.py          # Shared CDP connection + tab selection
 │
 ├── course_exports/               # >>> Put your edX .tar.gz here <<<
-├── transcripts/                  # <video url_name>.txt — from OLX, YouTube, Teams or Whisper
+├── transcripts/                  # <video url_name>.txt — from OLX, YouTube, Teams or Whisper;
+│                                 #   Module_<n>*.txt are appended to that module's PDF
 ├── Organized_Course_Content/     # Chapter folders with .txt and .mp3, and the module PDFs
 │
 ├── course_structure.json         # Parsed course tree + which archive it came from
@@ -415,6 +416,26 @@ webinars that have a better source, and these files have none. Length comes from
 `ffprobe`, which ships with ffmpeg; without it the length is estimated from file size and
 the plan marks it `~`. On a typical CPU the `small` model runs at about a quarter of real
 time, so an hour and a half of audio is roughly 20–25 minutes of work.
+
+### Additional material that is not in the export
+
+Only things in the edX export reach a module PDF by default: video transcripts matched
+to a video component, and `static/` files a unit links. For text that lives outside the
+course — a transcript of this year's webinar, say, when the recording is not in the
+course — keep the file in `transcripts/` and name it for its module:
+
+```
+transcripts\Module_1_Webinar_1.txt
+transcripts\Module_1_Webinar_2.docx
+```
+
+`python tools\build_module_pdf.py --module 1` appends every `.txt`, `.md`, `.vtt`,
+`.srt` or `.docx` named `Module_1` or `Module_1_<anything>` to that module's PDF, last,
+under an "Additional material" heading that says it is not part of the export. The part
+after the prefix becomes the heading (`Module_1_Webinar_1` → "Webinar 1"), and the build
+lists each file added or not read. `Module_1` does not claim `Module_10`. An unnumbered
+module uses the same name as its PDF (`Module_Final_seminar_...`). Files named by video
+`url_name` are unaffected.
 
 ### Video downloads
 

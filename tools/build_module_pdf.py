@@ -24,6 +24,7 @@ import os
 import re
 import sys
 import xml.etree.ElementTree as ET
+from typing import Any, Callable
 from xml.sax.saxutils import escape as xml_escape
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -34,7 +35,8 @@ from olx_archive import (CourseArchiveError, describe_source,  # noqa: E402
                          open_for_structure)
 from course_html import (HIDDEN_CLASS_RE, HIDDEN_STYLE_RE,  # noqa: E402,F401
                          HtmlToBlocks, hides_content, parse_html, record)
-from asset_text import (asset_key, asset_text,  # noqa: E402
+from asset_text import (asset_key, asset_text, extract_docx,  # noqa: E402
+                        extract_plain,
                         audio_source_id, linked_audio, linked_documents,
                         static_lookup)
 
@@ -485,10 +487,128 @@ def build_styles(fonts=None):
     return styles
 
 
+# --------------------------------------------------------------------------
+# Additional material that is not in the export
+# --------------------------------------------------------------------------
+
+EXTRA_SUFFIXES = (".txt", ".md", ".vtt", ".srt", ".docx")
+
+
+Module = dict[str, Any]
+
+
+def module_prefix(module: Module) -> str:
+    """The filename prefix that claims a file for this module: "Module_1"."""
+    return os.path.splitext(module_filename(module))[0]
+
+
+def _has_prefix(stem: str, prefix: str) -> bool:
+    """True when *stem* is *prefix*, or *prefix* followed by a separator."""
+    return stem == prefix or (stem.startswith(prefix)
+                              and not stem[len(prefix)].isalnum())
+
+
+def claims_file(module: Module, filename: str,
+                modules: list[Module] | None = None) -> bool:
+    """True when *filename* is "Module_<n>" or "Module_<n>_<anything>".
+
+    The prefix must end at a separator, so Module_1 never claims Module_10.
+    Case is ignored, since Windows ignores it too. When *modules* (every module
+    in the course) is given, the module with the longest matching prefix wins,
+    so "Module_Final_seminar_April_1st_x.txt" belongs to "Final seminar - April
+    1st" and not also to "Final seminar".
+    """
+    stem, ext = os.path.splitext(filename)
+    if ext.lower() not in EXTRA_SUFFIXES or filename.startswith(("~$", ".")):
+        return False
+    stem = stem.lower()
+    prefix = module_prefix(module).lower()
+    if not _has_prefix(stem, prefix):
+        return False
+    for other in modules or []:
+        longer = module_prefix(other).lower()
+        if len(longer) > len(prefix) and _has_prefix(stem, longer):
+            return False
+    return True
+
+
+def extra_title(module: Module, filename: str) -> str:
+    """A heading from a filename: Module_1_Webinar_1.txt -> "Webinar 1"."""
+    stem = os.path.splitext(filename)[0]
+    rest = stem[len(module_prefix(module)):] if claims_file(module, filename) else stem
+    title = re.sub(r"\s+", " ", re.sub(r"[_\-]+", " ", rest)).strip()
+    return title or re.sub(r"\s+", " ", stem.replace("_", " ")).strip() or filename
+
+
+def read_extra_file(path: str) -> tuple[list[str], str]:
+    """(paragraphs, how) for one extra file; paragraphs is [] when unreadable.
+
+    A .vtt/.srt goes through the transcript reader, which unwraps Teams speaker
+    tags. A .docx is read with the stdlib, as the course's own documents are.
+    Plain text keeps one paragraph per line, so a transcript with a line per
+    speaker turn stays readable as dialogue. Text is decoded strictly, falling
+    back to Windows-1252 (what Word's "Plain Text" export can produce) rather
+    than dropping bytes; *how* says "(lossy)" only if every decoder failed.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    try:
+        if ext == ".docx":
+            with open(path, "rb") as fh:
+                text, how = extract_docx(fh.read())
+            return [ln.strip() for ln in text.splitlines() if ln.strip()], how
+        if ext in (".vtt", ".srt"):
+            text = read_transcript(path)
+            return ([text] if text else []), "read as a caption file"
+        with open(path, "rb") as fh:
+            text, how = extract_plain(fh.read())
+    except OSError as exc:
+        return [], f"could not be opened: {exc.strerror or exc}"
+    return [ln.strip() for ln in text.splitlines() if ln.strip()], how
+
+
+def extra_material_story(module: Module, transcripts_dir: str | None,
+                         styles: dict[str, Any], stats: dict[str, Any],
+                         para: Callable[..., Any],
+                         modules: list[Module] | None = None) -> list[Any]:
+    """Flowables for the module's extra files, or [] when it has none.
+
+    These are files that live outside the edX export - a transcript of a webinar
+    the course does not carry, say - kept in the transcripts folder and named
+    Module_<n>... so they stay apart from the url_name-keyed ones. They go
+    last, under their own heading, so the PDF never implies the course page
+    holds them. *modules* lets a file go to the one module whose name matches
+    it longest.
+    """
+    stats.setdefault("extra", [])
+    stats.setdefault("extra_unread", [])
+    stats.setdefault("extra_lossy", [])
+    if not transcripts_dir or not os.path.isdir(transcripts_dir):
+        return []
+    names = sorted(n for n in os.listdir(transcripts_dir)
+                   if claims_file(module, n, modules))
+    flow: list[Any] = []
+    for name in names:
+        paragraphs, how = read_extra_file(os.path.join(transcripts_dir, name))
+        if not paragraphs:
+            stats["extra_unread"].append((name, how or "empty"))
+            continue
+        if "lossy" in how:
+            stats["extra_lossy"].append(name)
+        if not flow:
+            flow.append(para("Additional material", styles["chapter"]))
+            flow.append(para("Not part of the edX course export; added alongside it.",
+                             styles["video"]))
+        flow.append(para(extra_title(module, name), styles["unit"]))
+        for text in paragraphs:
+            flow.append(para(text, styles["body"]))
+        stats["extra"].append((name, sum(len(t.split()) for t in paragraphs)))
+    return flow
+
+
 def module_story(module, archive, styles, stats, unicode_ok=True,
                  transcripts_dir=None, include_hidden=False,
-                 include_documents=True):
-    """Flowables for one module, in course order."""
+                 include_documents=True, all_modules=None):
+    """Flowables for one module, in course order, then any extra material."""
     from reportlab.platypus import Paragraph, Spacer
     from reportlab.lib.units import mm
 
@@ -622,6 +742,8 @@ def module_story(module, archive, styles, stats, unicode_ok=True,
                         stats["skipped"][ctype] = stats["skipped"].get(ctype, 0) + 1
 
         story.append(Spacer(1, 4 * mm))
+    story.extend(extra_material_story(module, transcripts_dir, styles, stats, para,
+                                      all_modules))
     return story
 
 
@@ -727,7 +849,8 @@ def main() -> int:
     story = module_story(module, archive, styles, stats, unicode_ok=bool(fonts),
                          transcripts_dir=args.transcripts_dir,
                          include_hidden=args.include_hidden,
-                         include_documents=not args.no_documents)
+                         include_documents=not args.no_documents,
+                         all_modules=modules)
 
     os.makedirs(args.out_dir, exist_ok=True)
     out_path = os.path.join(args.out_dir, module_filename(module))
@@ -769,6 +892,16 @@ def main() -> int:
         if stats["audio_untranscribed"]:
             print("       python tools/transcribe_videos.py --module "
                   f"{module_arg(module)}")
+    if stats.get("extra") or stats.get("extra_unread"):
+        print(f"     additional material: {len(stats['extra'])} file(s) from "
+              f"{args.transcripts_dir}/ ({module_prefix(module)}*)")
+        for name, words in stats["extra"]:
+            print(f"       [added] {name[:52]} ({words} words)")
+        for name, how in stats["extra_unread"]:
+            print(f"       [not read] {name[:46]}: {how[:60]}")
+        for name in stats.get("extra_lossy", []):
+            print(f"       [WARN] {name[:46]}: not valid UTF-8 or Windows-1252; "
+                  "some characters were replaced")
     if stats["skipped"]:
         detail = ", ".join(f"{n} {t}" for t, n in sorted(stats["skipped"].items()))
         print(f"     not included: {detail}")
