@@ -80,8 +80,24 @@ def test_extra_material():
             failures.append("a missing folder must add nothing")
 
     unnumbered = {"number": "", "title": "Final seminar - April 1st", "chapters": []}
-    if not claims_file(unnumbered, "Module_Final_seminar_April_1st_Recording.txt"):
+    shorter = {"number": "", "title": "Final seminar", "chapters": []}
+    both = [shorter, unnumbered]
+    name = "Module_Final_seminar_April_1st_Recording.txt"
+    if not claims_file(unnumbered, name, both):
         failures.append("an unnumbered module should be claimed by its PDF name")
+    if claims_file(shorter, name, both):
+        failures.append("the shorter module must not also claim the longer one's file")
+    if not claims_file(shorter, "Module_Final_seminar_Notes.txt", both):
+        failures.append("the shorter module should still claim its own file")
+
+    # Windows-1252 text (Word's Plain Text export) must keep its characters.
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "Module_1_cp.txt")
+        with open(path, "wb") as fh:
+            fh.write("Välkommen Åsa — café\n".encode("cp1252"))
+        got, how = read_extra_file(path)
+        if got != ["Välkommen Åsa — café"] or "lossy" in how:
+            failures.append(f"cp1252 text was mangled: {got!r} ({how})")
     if extra_title(MODULE, "Module_1_Webinar_1.txt") != "Webinar 1":
         failures.append("extra_title should drop the module prefix")
     if read_extra_file(os.path.join(ROOT, "no_such_file.txt"))[0]:
