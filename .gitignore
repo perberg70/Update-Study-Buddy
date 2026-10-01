@@ -14,6 +14,9 @@ upload_results.json
 # Transcripts: course content, whether exported from Teams or produced locally.
 transcripts/
 
+# Extra material added to module PDFs from outside the export.
+extra_material/
+
 # Diagnostics, which also capture real source titles.
 export_sources_debug.json
 export_sources_debug.txt

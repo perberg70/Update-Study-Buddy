@@ -29,12 +29,12 @@ from xml.sax.saxutils import escape as xml_escape
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import (COURSE_STRUCTURE_PATH,  # noqa: E402
-                    ORGANIZED_CONTENT_DIR, TRANSCRIPTS_DIR)
+                    EXTRA_MATERIAL_DIR, ORGANIZED_CONTENT_DIR, TRANSCRIPTS_DIR)
 from olx_archive import (CourseArchiveError, describe_source,  # noqa: E402
                          open_for_structure)
 from course_html import (HIDDEN_CLASS_RE, HIDDEN_STYLE_RE,  # noqa: E402,F401
                          HtmlToBlocks, hides_content, parse_html, record)
-from asset_text import (asset_key, asset_text,  # noqa: E402
+from asset_text import (asset_key, asset_text, extract_docx,  # noqa: E402
                         audio_source_id, linked_audio, linked_documents,
                         static_lookup)
 
@@ -485,10 +485,84 @@ def build_styles(fonts=None):
     return styles
 
 
+# --------------------------------------------------------------------------
+# Additional material that is not in the export
+# --------------------------------------------------------------------------
+
+EXTRA_SUFFIXES = (".txt", ".md", ".vtt", ".srt", ".docx")
+
+
+def extra_material_dir(base, module):
+    """Folder holding extra files for one module: <base>/Module_1, say."""
+    return os.path.join(base, os.path.splitext(module_filename(module))[0])
+
+
+def extra_title(filename):
+    """A readable heading from a filename: Webinar_1_2026.txt -> Webinar 1 2026."""
+    stem = os.path.splitext(filename)[0]
+    return re.sub(r"\s+", " ", stem.replace("_", " ")).strip() or filename
+
+
+def read_extra_file(path):
+    """(paragraphs, how) for one extra file; paragraphs is [] when unreadable.
+
+    A .vtt/.srt goes through the transcript reader, which unwraps Teams speaker
+    tags. A .docx is read with the stdlib, as the course's own documents are.
+    Plain text keeps one paragraph per line, so a transcript with a line per
+    speaker turn stays readable as dialogue.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    try:
+        if ext == ".docx":
+            with open(path, "rb") as fh:
+                text, how = extract_docx(fh.read())
+            return [ln.strip() for ln in text.splitlines() if ln.strip()], how
+        if ext in (".vtt", ".srt"):
+            text = read_transcript(path)
+            return ([text] if text else []), "read as a caption file"
+        with open(path, "r", encoding="utf-8-sig", errors="ignore") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        return [], f"could not be opened: {exc.strerror or exc}"
+    return [ln.strip() for ln in raw.splitlines() if ln.strip()], "read as text"
+
+
+def extra_material_story(module, base_dir, styles, stats, para):
+    """Flowables for the module's extra files, or [] when it has none.
+
+    These are files that live outside the edX export - a webinar transcript for
+    a recording the course does not carry, say. They go last, under their own
+    heading, so the PDF never implies the course page holds them.
+    """
+    folder = extra_material_dir(base_dir, module) if base_dir else ""
+    stats.setdefault("extra", [])
+    stats.setdefault("extra_unread", [])
+    if not folder or not os.path.isdir(folder):
+        return []
+    names = sorted(n for n in os.listdir(folder)
+                   if os.path.splitext(n)[1].lower() in EXTRA_SUFFIXES
+                   and not n.startswith(("~$", ".")))
+    flow = []
+    for name in names:
+        paragraphs, how = read_extra_file(os.path.join(folder, name))
+        if not paragraphs:
+            stats["extra_unread"].append((name, how or "empty"))
+            continue
+        if not flow:
+            flow.append(para("Additional material", styles["chapter"]))
+            flow.append(para("Not part of the edX course export; added alongside it.",
+                             styles["video"]))
+        flow.append(para(extra_title(name), styles["unit"]))
+        for text in paragraphs:
+            flow.append(para(text, styles["body"]))
+        stats["extra"].append((name, sum(len(t.split()) for t in paragraphs)))
+    return flow
+
+
 def module_story(module, archive, styles, stats, unicode_ok=True,
                  transcripts_dir=None, include_hidden=False,
-                 include_documents=True):
-    """Flowables for one module, in course order."""
+                 include_documents=True, extra_dir=None):
+    """Flowables for one module, in course order, then any extra material."""
     from reportlab.platypus import Paragraph, Spacer
     from reportlab.lib.units import mm
 
@@ -622,6 +696,7 @@ def module_story(module, archive, styles, stats, unicode_ok=True,
                         stats["skipped"][ctype] = stats["skipped"].get(ctype, 0) + 1
 
         story.append(Spacer(1, 4 * mm))
+    story.extend(extra_material_story(module, extra_dir, styles, stats, para))
     return story
 
 
@@ -657,6 +732,10 @@ def main() -> int:
     parser.add_argument("--out-dir", default=ORGANIZED_CONTENT_DIR)
     parser.add_argument("--transcripts-dir", default=TRANSCRIPTS_DIR,
                         help="directory of transcripts keyed by video url_name")
+    parser.add_argument("--extra-dir", default=EXTRA_MATERIAL_DIR,
+                        help="folder of extra files outside the export, one "
+                             "subfolder per module (e.g. extra_material/Module_1/); "
+                             "appended to that module's PDF. .txt .md .vtt .srt .docx")
     parser.add_argument("--tar", dest="tar_path",
                         help="course .tar.gz to read (default: the one "
                              "course_structure.json was built from)")
@@ -727,7 +806,8 @@ def main() -> int:
     story = module_story(module, archive, styles, stats, unicode_ok=bool(fonts),
                          transcripts_dir=args.transcripts_dir,
                          include_hidden=args.include_hidden,
-                         include_documents=not args.no_documents)
+                         include_documents=not args.no_documents,
+                         extra_dir=args.extra_dir)
 
     os.makedirs(args.out_dir, exist_ok=True)
     out_path = os.path.join(args.out_dir, module_filename(module))
@@ -769,6 +849,13 @@ def main() -> int:
         if stats["audio_untranscribed"]:
             print("       python tools/transcribe_videos.py --module "
                   f"{module_arg(module)}")
+    if stats.get("extra") or stats.get("extra_unread"):
+        print(f"     additional material: {len(stats['extra'])} file(s) from "
+              f"{extra_material_dir(args.extra_dir, module)}")
+        for name, words in stats["extra"]:
+            print(f"       [added] {name[:52]} ({words} words)")
+        for name, how in stats["extra_unread"]:
+            print(f"       [not read] {name[:46]}: {how[:60]}")
     if stats["skipped"]:
         detail = ", ".join(f"{n} {t}" for t, n in sorted(stats["skipped"].items()))
         print(f"     not included: {detail}")
