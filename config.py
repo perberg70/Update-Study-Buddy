@@ -42,9 +42,6 @@ UPLOAD_DEBUG_PATH = os.getenv("UPLOAD_DEBUG_PATH", "upload_verify_debug.json")
 # keyed by the video's url_name. Anything dropped here is picked up by
 # tools/build_module_pdf.py without further configuration.
 TRANSCRIPTS_DIR = os.getenv("TRANSCRIPTS_DIR", "transcripts")
-# Files that are not in the edX export but belong in a module PDF: one subfolder
-# per module (extra_material/Module_1/).
-EXTRA_MATERIAL_DIR = os.getenv("EXTRA_MATERIAL_DIR", "extra_material")
 ORGANIZED_CONTENT_DIR = os.getenv("ORGANIZED_CONTENT_DIR", "Organized_Course_Content")
 COURSE_STRUCTURE_PATH = os.getenv("COURSE_STRUCTURE_PATH", "course_structure.json")
 

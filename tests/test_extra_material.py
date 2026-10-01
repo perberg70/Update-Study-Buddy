@@ -12,7 +12,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 
-from build_module_pdf import (extra_material_dir, extra_material_story,  # noqa: E402
+from build_module_pdf import (claims_file, extra_material_story,  # noqa: E402
                               extra_title, read_extra_file)
 
 
@@ -40,45 +40,50 @@ def make_docx(path, lines):
 def test_extra_material():
     failures = []
     with tempfile.TemporaryDirectory() as base:
-        folder = extra_material_dir(base, MODULE)
-        if os.path.basename(folder) != "Module_1":
-            failures.append(f"module 1 folder should be Module_1, got {folder}")
-        os.makedirs(folder)
-        os.makedirs(extra_material_dir(base, {"number": "2", "title": "x", "chapters": []}))
+        def put(name, text="x"):
+            with open(os.path.join(base, name), "w", encoding="utf-8") as fh:
+                fh.write(text)
 
-        with open(os.path.join(folder, "Webinar_1_2026.txt"), "w", encoding="utf-8") as fh:
-            fh.write("Per: Hej och välkomna.\n\nAnna: Tack, Åsa.\n")
-        make_docx(os.path.join(folder, "Webinar_2.docx"), ["First line", "Second line"])
-        with open(os.path.join(folder, "empty.txt"), "w") as fh:
-            fh.write("   \n")
-        with open(os.path.join(folder, "~$lock.docx"), "w") as fh:
-            fh.write("junk")
-        with open(os.path.join(folder, "ignored.pdf"), "w") as fh:
-            fh.write("junk")
+        put("Module_1_Webinar_1.txt", "Per: Hej och välkomna.\n\nAnna: Tack, Åsa.\n")
+        put("Module_1.txt", "Overview line")
+        make_docx(os.path.join(base, "module_1_Webinar_2.docx"), ["First line", "Second line"])
+        put("Module_1_empty.txt", "   \n")
+        put("Module_10_Webinar.txt", "belongs to module 10")
+        put("Module_1x.txt", "not a separator")
+        put("Module_2_Webinar.txt", "belongs to module 2")
+        put("abc123_video.txt", "a url_name transcript")
+        put("~$Module_1_lock.docx", "junk")
+        put("Module_1_notes.pdf", "junk")
+        put(".sources.json", "{}")
 
         stats = {}
         flow = extra_material_story(MODULE, base, STYLES, stats, para)
         texts = [f.text for f in flow]
         if texts[0] != "Additional material":
             failures.append(f"should open with the heading, got {texts[:1]}")
-        for want in ("Webinar 1 2026", "Per: Hej och välkomna.", "Tack, Åsa".join(["Anna: ", "."]),
-                     "Webinar 2", "Second line"):
+        for want in ("Webinar 1", "Per: Hej och välkomna.", "Anna: Tack, Åsa.",
+                     "Webinar 2", "Second line", "Overview line", "Module 1"):
             if want not in texts:
                 failures.append(f"missing {want!r} in {texts}")
-        if [n for n, _ in stats["extra"]] != ["Webinar_1_2026.txt", "Webinar_2.docx"]:
-            failures.append(f"wrong files added: {stats['extra']}")
-        if [n for n, _ in stats["extra_unread"]] != ["empty.txt"]:
+        added = [n for n, _ in stats["extra"]]
+        if added != ["Module_1.txt", "Module_1_Webinar_1.txt", "module_1_Webinar_2.docx"]:
+            failures.append(f"wrong files added: {added}")
+        if [n for n, _ in stats["extra_unread"]] != ["Module_1_empty.txt"]:
             failures.append(f"empty file should be reported: {stats['extra_unread']}")
 
-        other = extra_material_story({"number": "3", "title": "t", "chapters": []},
-                                     base, STYLES, {}, para)
-        if other:
-            failures.append("a module with no folder must add nothing")
+        for other in ({"number": "3", "title": "t", "chapters": []},):
+            if extra_material_story(other, base, STYLES, {}, para):
+                failures.append("a module with no matching file must add nothing")
         if extra_material_story(MODULE, None, STYLES, {}, para):
-            failures.append("no base dir must add nothing")
+            failures.append("no folder must add nothing")
+        if extra_material_story(MODULE, os.path.join(base, "nope"), STYLES, {}, para):
+            failures.append("a missing folder must add nothing")
 
-    if extra_title("Webinar_1__2026_Transcript.txt") != "Webinar 1 2026 Transcript":
-        failures.append("extra_title should tidy underscores")
+    unnumbered = {"number": "", "title": "Final seminar - April 1st", "chapters": []}
+    if not claims_file(unnumbered, "Module_Final_seminar_April_1st_Recording.txt"):
+        failures.append("an unnumbered module should be claimed by its PDF name")
+    if extra_title(MODULE, "Module_1_Webinar_1.txt") != "Webinar 1":
+        failures.append("extra_title should drop the module prefix")
     if read_extra_file(os.path.join(ROOT, "no_such_file.txt"))[0]:
         failures.append("a missing file must read as empty, not raise")
 
