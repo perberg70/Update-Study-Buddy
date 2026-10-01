@@ -143,22 +143,52 @@ def new_alerts(before, after):
     return [a for a in fresh.elements() if ERROR_RE.search(a)]
 
 
+# A title shorter than this cannot vouch for a file by being part of its name:
+# "Module" is inside every module's filename.
+MIN_REVERSE_WORDS = 3
+
+
+def correlates(title, file_name):
+    """Whether a source title can be this file's.
+
+    Either way round: the file's stem inside the title ("01_Welcome.txt" is
+    titled "01_Welcome.txt"), or a title of some length inside the stem - a PDF
+    can be titled from its metadata, "Final seminar - April 1st", where the file
+    is Module_Final_seminar_April_1st.pdf.
+    """
+    stem, flat = canonical(os.path.splitext(file_name)[0]), canonical(title)
+    if not stem or not flat:
+        return False
+    if stem in flat:
+        return True
+    return len(flat.split()) >= MIN_REVERSE_WORDS and flat in stem
+
+
 def appeared(before, after, file_name):
-    """(title, "") for the upload's row, (None, "") if not there yet, or
-    (None, why) when it cannot be told apart from another new row."""
+    """(title, "") for the upload's row, (None, "") if it is not there yet, or
+    (None, why) when several new rows could each be it.
+
+    Only a row that correlates with the file counts. Any other new row - one
+    that rendered late, one a collaborator added - is not proof of this upload,
+    and not a failure either: it is waited past, because the upload's own row
+    may come on the next read. Failing at once would record the upload as
+    failed, and a re-run would send it a second time.
+    """
     fresh = sorted(set(new_titles(before, after)))
-    if not fresh:
+    matches = [t for t in fresh if correlates(t, file_name)]
+    if not matches:
         return None, ""
-    if len(fresh) == 1:
-        # Whatever it is called: a PDF can be titled from its own metadata
-        # ("Module 1: Welcome") rather than its filename.
-        return fresh[0], ""
-    stem = canonical(os.path.splitext(file_name)[0])
-    matches = [t for t in fresh if stem and stem in canonical(t)]
     if len(matches) == 1:
         return matches[0], ""
-    return None, (f"cannot tell which new source is this upload: {len(fresh)} appeared "
-                  f"({'; '.join(t[:40] for t in fresh[:3])})")
+    return None, (f"cannot tell which new source is this upload: {len(matches)} match it "
+                  f"({'; '.join(t[:40] for t in matches[:3])})")
+
+
+def unrelated_arrivals(before, after, file_name):
+    """New rows that do not correlate with the file - named when an upload times
+    out, so "never appeared" is not said when something else did."""
+    return [t for t in sorted(set(new_titles(before, after)))
+            if not correlates(t, file_name)]
 
 
 # --------------------------------------------------------------------------
@@ -302,13 +332,14 @@ def record_result(path, results, key, **fields):
 def prior_decision(results, key, panel, notebook):
     """What to do with a file an earlier run may already have uploaded.
 
-    ("skip", entry)    verified before, and its title is still in the notebook;
+    ("skip", entry)    verified before, and a copy is still there, ready, with no
+                       error beside it;
     ("promote", entry) it arrived before and is still there, without an error -
                        waited on again rather than uploaded again, so re-running
                        while a long recording is still processing does not
                        upload it twice;
-    ("upload", None)   anything else: never recorded, a changed file, gone from
-                       the notebook, or showing an error.
+    ("upload", None)   anything else: never recorded, another notebook, a changed
+                       file, gone from the notebook, or showing an error.
 
     *copies* guards a same-title REPLACE: the old copy alone does not count as
     the new one having arrived.
@@ -320,8 +351,17 @@ def prior_decision(results, key, panel, notebook):
     if not title:
         return "upload", None
     states = panel.states(title)
-    if entry.get("status") == VERIFIED and states:
+    # A ready copy and no error. Not "copies" ready: after --apply removes a
+    # same-title REPLACE's old copy only one is left, and requiring two would
+    # upload every unchanged file again on every later run. If the new copy had
+    # vanished and the old one remained, skipping is still safe: delete_agent's
+    # same-title path keeps exactly one copy.
+    if entry.get("status") == VERIFIED and READY in states and ERROR not in states:
         return "skip", entry
+    if entry.get("status") == VERIFIED and states and ERROR not in states:
+        # Verified once, processing again: wait on the copies there now, rather
+        # than re-send - and not on a recorded count --apply may since have halved.
+        return "promote", dict(entry, copies=len(states))
     if entry.get("status") in (UNCONFIRMED, "appeared") \
             and len(states) >= copies and ERROR not in states:
         return "promote", entry

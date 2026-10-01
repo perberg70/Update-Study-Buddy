@@ -123,7 +123,9 @@ def run_upload(only=None, wait_minutes=DEFAULT_WAIT_MINUTES) -> int:
         return 0
 
     results = uv.load_results(UPLOAD_RESULTS_PATH)
-    verified, unconfirmed, failed = [], [], []
+    verified: list[str] = []
+    unconfirmed: list[tuple[str, str]] = []
+    failed: list[tuple[str, str]] = []
     arrived = []            # uploads whose row appeared; phase B waits on these
     debug = []
     earlier = 0
@@ -265,7 +267,12 @@ def run_upload(only=None, wait_minutes=DEFAULT_WAIT_MINUTES) -> int:
             outcome, now = uv.poll(read, uv.arrival_check(before, file_name), timeout,
                                    interval=POLL_INTERVAL)
             if outcome is None:
-                reason = f"never appeared in the Sources panel within {timeout:.0f}s"
+                reason = (f"no source matching it appeared in the Sources panel within "
+                          f"{timeout:.0f}s")
+                others = uv.unrelated_arrivals(before, now, file_name)
+                if others:
+                    reason += (f"; new but not this file: "
+                               f"{'; '.join(t[:40] for t in others[:3])}")
             elif outcome[0] == uv.FAILED:
                 reason = outcome[2]
             else:
@@ -290,7 +297,7 @@ def run_upload(only=None, wait_minutes=DEFAULT_WAIT_MINUTES) -> int:
         if arrived:
             print(f"\n--- Waiting for {len(arrived)} upload(s) to finish processing "
                   f"(up to {wait_minutes:g} min) ---")
-            outcomes = {}
+            outcomes: dict[int, tuple[str, str]] = {}
             _, now = uv.poll(read, uv.settle_check(baseline, arrived, outcomes),
                              wait_minutes * 60, interval=POLL_INTERVAL)
             uv.unsettled(now, arrived, outcomes, wait_minutes)

@@ -131,8 +131,35 @@ def unit_cases():
     result, _ = arrive(base, "a.txt", two)
     check(out, result and result[1] == "a.txt", f"two new rows, the stem decides: {result}")
     result, _ = arrive(base, "zzz.txt", two)
+    check(out, result is None,
+          f"two new rows, neither ours by name: keep waiting, then time out: {result}")
+    both = panel(("Old.txt", "ready"), ("a.txt", "processing"), ("a.txt notes", "ready"))
+    result, _ = arrive(base, "a.txt", both)
     check(out, result and result[0] == uv.FAILED and "cannot tell" in result[2],
-          f"two new rows, neither ours by name: ambiguous is a failure: {result}")
+          f"two new rows that both match: waiting cannot resolve that: {result}")
+
+    # Codex, on #19: an unrelated row first must not fail the upload whose own
+    # row comes on the next read - a failure there is a re-upload next run.
+    result, _ = arrive(base, "01_Welcome.txt",
+                       panel(("Old.txt", "ready"), ("Someone else's notes", "ready")),
+                       panel(("Old.txt", "ready"), ("Someone else's notes", "ready"),
+                             ("01_Welcome.txt", "processing")))
+    check(out, result and result[:2] == ("appeared", "01_Welcome.txt"),
+          f"an unrelated row first, then ours: ours arrives: {result}")
+    lone = panel(("Old.txt", "ready"), ("Someone else's notes", "ready"))
+    result, _ = arrive(base, "01_Welcome.txt", lone)
+    check(out, result is None, f"only an unrelated row: never proof of this upload: {result}")
+    check(out, uv.unrelated_arrivals(base, lone, "01_Welcome.txt") == ["Someone else's notes"],
+          "the unrelated row is named when the upload times out")
+
+    # Correlation runs both ways, but a short title vouches for nothing.
+    check(out, uv.correlates("Final seminar - April 1st",
+                             "Module_Final_seminar_April_1st.pdf"),
+          "a metadata title inside the filename correlates")
+    check(out, not uv.correlates("Module", "Module_Final_seminar_April_1st.pdf"),
+          "a one-word title must not match every module")
+    check(out, not uv.correlates("Someone else's notes", "01_Welcome.txt"),
+          "an unrelated title does not correlate")
 
     # Same-title REPLACE: the old copy shares the title.
     same_before = panel(("01_Welcome.txt", "ready"))
@@ -193,6 +220,20 @@ def unit_cases():
         decide = lambda r, p, nb="nb": uv.prior_decision(r, key, p, nb)[0]
         check(out, decide(results, panel(("a.txt", "ready"))) == "skip",
               "verified and still present: not uploaded again")
+        check(out, decide(results, panel(("a.txt", "error"))) == "upload",
+              "verified, but now only an error row: upload again (Codex, #12)")
+        check(out, decide(results, panel(("a.txt", "ready"), ("a.txt", "error"))) == "upload",
+              "a ready copy beside an error: upload again")
+        check(out, decide(results, panel(("a.txt", "processing"))) == "promote",
+              "verified, now processing: wait on it, do not re-send")
+        after_apply = {key: dict(status=uv.VERIFIED, title="a.txt", copies=2, notebook="nb")}
+        promoted = uv.prior_decision(after_apply, key, panel(("a.txt", "processing")),
+                                     "nb")[1] or {}
+        check(out, promoted.get("copies") == 1,
+              f"waits on the one copy there now, not a recorded two: {promoted}")
+        check(out, decide(after_apply, panel(("a.txt", "ready"))) == "skip",
+              "same-title REPLACE after --apply removed the old copy: one ready copy "
+              "left must still skip, or every later run re-uploads it")
         check(out, decide(results, panel(("b.txt", "ready"))) == "upload",
               "verified but gone from the notebook: upload again")
         check(out, decide(results, panel(("a.txt", "ready")), "other") == "upload",
@@ -370,7 +411,8 @@ def end_to_end():
                                        "slow.txt"])
         check(out, code == 1, f"any unverified upload must exit 1:\n{text}")
         for needle in ["1 verified", "1 still processing", "3 failed",
-                       "never appeared", "could not be imported", "Couldn't import",
+                       "no source matching it appeared", "could not be imported",
+                       "Couldn't import",
                        "still processing after"]:
             check(out, needle in text, f"run output should say {needle!r}:\n{text}")
         check(out, os.path.exists(agent.UPLOAD_DEBUG_PATH), "debug file written")
@@ -419,6 +461,31 @@ def end_to_end():
         code, text = run(agent, page, ["ok.txt"])
         check(out, code == 1 and "gone from the Sources panel after processing" in text,
               f"accepted then dropped must fail:\n{text}")
+
+        # An unrelated source added during the upload neither fails it nor
+        # stands in for it.
+        os.remove(agent.UPLOAD_RESULTS_PATH)
+        page = FakePage([("Old.txt", "ready")], {"ok.txt": ("ok", 4)})
+        real_receive = page.receive
+
+        def receive_with_neighbour(path):
+            page.rows.append(dict(name="Someone else's notes", state="ready"))
+            real_receive(path)
+
+        page.receive = receive_with_neighbour
+        code, text = run(agent, page, ["ok.txt"])
+        results = json.load(open(agent.UPLOAD_RESULTS_PATH))
+        check(out, code == 0 and list(results.values())[0].get("title") == "ok.txt",
+              f"an unrelated row during the upload: still verified as itself:\n{text}")
+
+        os.remove(agent.UPLOAD_RESULTS_PATH)
+        page = FakePage([("Old.txt", "ready")], {"lost.txt": ("never",)})
+        page.receive = lambda path: (page.uploads.append(os.path.basename(path)),
+                                     page.rows.append(dict(name="Someone else's notes",
+                                                           state="ready")))
+        code, text = run(agent, page, ["lost.txt"])
+        check(out, code == 1 and "new but not this file: Someone else's notes" in text,
+              f"an upload that never arrives, beside an unrelated row, fails and says so:\n{text}")
 
         # 6. --only: a supervised single-file run.
         os.remove(agent.UPLOAD_RESULTS_PATH)
@@ -472,6 +539,8 @@ def main():
         print("  [PASS] ready only with the proven checkbox signal; errors from status,")
         print("         never from a title; toasts, ambiguity and silence all fail")
         print("  [PASS] same-title REPLACE needs the new copy ready, not the old one")
+        print("  [PASS] unrelated rows are waited past, never proof; a verified file")
+        print("         is skipped only while a copy is ready with no error beside it")
         print("  [PASS] re-runs skip verified uploads and wait on ones still processing")
         print("  [PASS] run_upload exits 0 only when every upload is verified")
         print("  [PASS] --apply deletes nothing after an unverified upload")
